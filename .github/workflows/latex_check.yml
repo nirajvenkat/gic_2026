@@ -16,11 +16,18 @@ jobs:
         with:
           fetch-depth: 0 
 
-      - name: Install Tectonic
+      - name: Install Tectonic and Fonts
         run: |
-          # Official Tectonic installer script
+          # 1. Install Microsoft Core Fonts (Times New Roman)
+          sudo apt-get update
+          echo "ttf-mscorefonts-installer msttcorefonts/accepted-mscorefonts-eula select true" | sudo debconf-set-selections
+          sudo apt-get install -y ttf-mscorefonts-installer
+          
+          # 2. Refresh font cache so Tectonic can see them
+          sudo fc-cache -f -v
+
+          # 3. Install Tectonic
           curl --proto '=https' --tlsv1.2 -fsSL https://drop-sh.fullyjustified.net | sh
-          # Move it to a folder in the PATH
           sudo mv tectonic /usr/local/bin/
 
       - name: Compile each changed file
