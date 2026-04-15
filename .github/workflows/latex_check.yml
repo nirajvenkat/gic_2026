@@ -1,11 +1,11 @@
 name: General LaTeX Check
+
 on:
   pull_request:
-    paths:
-      - '**.tex'
+    # Removed paths filter so it always triggers
+    branches: [main]
   push:
     branches: [main]
-    paths: ['**.tex']
 
 jobs:
   build-changed-tex:
@@ -16,43 +16,50 @@ jobs:
         with:
           fetch-depth: 0 
 
-      - name: Install Tectonic and Fonts
-        run: |
-          # 1. Install Microsoft Core Fonts (Times New Roman)
-          sudo apt-get update
-          echo "ttf-mscorefonts-installer msttcorefonts/accepted-mscorefonts-eula select true" | sudo debconf-set-selections
-          sudo apt-get install -y ttf-mscorefonts-installer
-          
-          # 2. Refresh font cache so Tectonic can see them
-          sudo fc-cache -f -v
-
-          # 3. Install Tectonic
-          curl --proto '=https' --tlsv1.2 -fsSL https://drop-sh.fullyjustified.net | sh
-          sudo mv tectonic /usr/local/bin/
-
-      - name: Compile each changed file
+      - name: Detect changed TeX files
+        id: list-files
         run: |
           if [ "${{ github.event_name }}" == "pull_request" ]; then
             FILES=$(git diff --name-only origin/${{ github.base_ref }} HEAD | grep '\.tex$' || true)
           else
             FILES=$(git diff --name-only HEAD^ HEAD | grep '\.tex$' || true)
           fi
-
+          
+          # Clean the list to a single line and export it
+          FILES_CLEAN=$(echo $FILES | tr '\n' ' ')
+          echo "tex_files=$FILES_CLEAN" >> $GITHUB_OUTPUT
+          
           if [ -z "$FILES" ]; then
-            echo "No .tex files to compile."
-            exit 0
+            echo "found_changes=false" >> $GITHUB_OUTPUT
+          else
+            echo "found_changes=true" >> $GITHUB_OUTPUT
           fi
 
-          for file in $FILES; do
+      - name: Install Tectonic and Fonts
+        # Only run if TeX files were actually detected
+        if: steps.list-files.outputs.found_changes == 'true'
+        run: |
+          sudo apt-get update
+          echo "ttf-mscorefonts-installer msttcorefonts/accepted-mscorefonts-eula select true" | sudo debconf-set-selections
+          sudo apt-get install -y ttf-mscorefonts-installer
+          sudo fc-cache -f -v
+          curl --proto '=https' --tlsv1.2 -fsSL https://drop-sh.fullyjustified.net | sh
+          sudo mv tectonic /usr/local/bin/
+
+      - name: Compile each changed file
+        if: steps.list-files.outputs.found_changes == 'true'
+        run: |
+          for file in ${{ steps.list-files.outputs.tex_files }}; do
             echo "--------------------------------------------------"
             echo "Compiling with Tectonic: $file"
             echo "--------------------------------------------------"
-            
-            # Tectonic will download only the needed packages on the fly
             tectonic "$file"
-
             if [ $? -ne 0 ]; then
               echo "Error: $file failed to compile."
               exit 1
             fi
           done
+
+      - name: Skip Notification
+        if: steps.list-files.outputs.found_changes == 'false'
+        run: echo "No .tex files modified. Reporting success to unblock PR."
