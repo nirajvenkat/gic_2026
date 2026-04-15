@@ -16,19 +16,17 @@ jobs:
         with:
           fetch-depth: 0 
 
-      # Tectonic setup is much faster than pulling a 5GB Docker image
       - name: Setup Tectonic
-        uses: neowit/setup-tectonic@v1
-        with:
-          github_token: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          # Use mamba to install tectonic quickly
+          sudo apt-get update
+          sudo apt-get install -y tectonic
 
       - name: Compile each changed file
         run: |
-          # Detect changed files based on trigger type
           if [ "${{ github.event_name }}" == "pull_request" ]; then
             FILES=$(git diff --name-only origin/${{ github.base_ref }} HEAD | grep '\.tex$' || true)
           else
-            # Handles direct pushes to main
             FILES=$(git diff --name-only HEAD^ HEAD | grep '\.tex$' || true)
           fi
 
@@ -38,16 +36,6 @@ jobs:
           fi
 
           for file in $FILES; do
-            echo "--------------------------------------------------"
             echo "Compiling with Tectonic: $file"
-            echo "--------------------------------------------------"
-            
-            # Tectonic automatically handles multiple passes (bibtex, etc.) 
-            # and only downloads the packages you actually use.
             tectonic "$file"
-
-            if [ $? -ne 0 ]; then
-              echo "Error: $file failed to compile."
-              exit 1
-            fi
           done
