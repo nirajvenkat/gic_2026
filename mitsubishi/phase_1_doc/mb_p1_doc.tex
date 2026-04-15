@@ -55,25 +55,25 @@ We propose a hybrid quantum-classical architecture centered on a Generative Quan
 The modeling workflow captures the key photophysical chain at a technical but not overly granular level: absorption of a 92 eV photon, attosecond photoionization, formation of a core-ionized state, femtosecond Auger decay, and the generation of primary, Auger, and secondary electrons. Those secondary electrons undergo inelastic scattering in the resist matrix and drive the chemistry that ultimately produces radiation-induced blur and line-edge roughness. Hamiltonians are constructed for candidate molecules, evaluated through differentiable quantum circuits, and updated as molecular geometry or active-space assumptions evolve. Results are organized for a materials-informatics handoff that ranks candidates by their predicted spectral and electron-emission behavior.
 
 We model each candidate with a second-quantized electronic Hamiltonian,
-\begin{equation}
+\begin{equation*}
 \hat{H} = E_{\mathrm{core}} + \sum_{pq\sigma} h_{pq}\, a^{\dagger}_{p\sigma} a_{q\sigma}
 + \frac{1}{2}\sum_{pqrs\sigma\tau} g_{pqrs}\, a^{\dagger}_{p\sigma} a_{q\sigma} a^{\dagger}_{r\tau} a_{s\tau},
-\end{equation}
+\end{equation*}
 then map to qubits using Jordan--Wigner so that \(\hat{H}=\sum_{\ell} c_{\ell} P_{\ell}\) with Pauli strings \(P_{\ell}\). The GQE policy samples an operator sequence from a learned pool,
-\begin{equation}
+\begin{equation*}
 \rho(\mathbf{j}) = U_{j_L}\cdots U_{j_1}\,\rho_0\,U_{j_1}^{\dagger}\cdots U_{j_L}^{\dagger},
 \qquad
 E(\mathbf{j}) = \mathrm{Tr}\!\left[\hat{H}\rho(\mathbf{j})\right],
-\end{equation}
+\end{equation*}
 and optimizes a sequence-level objective that biases lower-energy circuits,
-\begin{equation}
+\begin{equation*}
 \mathcal{L}_{\mathrm{GQE}} = \left(\sum_{i=1}^{L} w_{j_i} - E(\mathbf{j})\right)^2.
-\end{equation}
+\end{equation*}
 For spectroscopy we estimate transition observables through the dipole response,
-\begin{equation}
+\begin{equation*}
 \sigma(\omega) \propto \omega\sum_{F\neq I}\sum_{\rho\in\{x,y,z\}}
 \frac{|\langle F|\hat{\mu}_{\rho}|I\rangle|^2\,\eta}{(E_F-E_I-\omega)^2+\eta^2},
-\end{equation}
+\end{equation*}
 which enables direct comparison to classical XAS reference spectra.
 
 \noindent\textbf{Technical Stack and Implementation Path}\\

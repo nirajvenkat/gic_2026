@@ -52,27 +52,27 @@ This Phase 1 concept targets the fundamental computational bottleneck in grid mo
 We map the discrete planning layer into Quadratic Unconstrained Binary Optimization (QUBO) and Ising Hamiltonian formulations so that binary siting, sizing, and topology decisions become native inputs to quantum search. Continuous dispatch variables, AC feasibility, and reliability constraints remain on classical solvers. This separation keeps the hardest combinatorial search in the quantum loop while preserving full-fidelity power-system validation in the classical loop, which is essential for a Phase 1 prototype that must already be anchored to utility test systems.
 
 \noindent\textbf{Hybrid Optimization Workflow}\\
-The iteration follows a Hybrid Quantum-Classical Benders Decomposition (HQCBD) workflow. Rather than a single-objective QUBO only, we use a QAMOO-style multi-objective master in which weighted graph objectives are sampled and refined across scenarios:
-\begin{align}
+The iteration follows a Hybrid Quantum-Classical Benders Decomposition (HQCBD) workflow. Rather than a single-objective QUBO only, we use a Quantum-Assisted Multi-Objective Optimization (QAMOO) master in which weighted graph objectives are sampled and refined across scenarios:
+\begin{align*}
 \max_{x,e}\quad & \mathbf{\lambda}^{\top}\mathbf{f}(x) = \sum_{k=1}^{m} \lambda_k f_k(x),
 \qquad \sum_{k=1}^{m}\lambda_k = 1,\ \lambda_k\ge 0, \\
 f_k(x) &= \sum_{(i,j)\in E_k} w_{ij}^{(k)} e_{ij},
 \quad x_i\in\{0,1\},\ e_{ij}\in\{0,1\},
-\end{align}
+\end{align*}
 with cut variables \(e_{ij}\) linked to partition binaries by standard linear constraints. For scenario \(\omega\in\Omega\), feasibility is enforced classically through AC constraints and operating limits. We then sample either weighted-sum or epsilon-constraint subproblems,
-\begin{equation}
+\begin{equation*}
 \max_x\ \sum_{k=1}^{m} c_k f_k(x)
 \quad\text{s.t.}\quad
 f_j(x)\ge\epsilon_j^{(\omega)}\ \forall j,
-\end{equation}
+\end{equation*}
 to enrich Pareto diversity before embedding into Ising form,
-\begin{equation}
+\begin{equation*}
 H_{\mathrm{cost}}(c)=\sum_{\langle i,j\rangle} h_{ij}(c) Z_i Z_j + \sum_i h_i(c) Z_i,
-\end{equation}
+\end{equation*}
 and executing QAOA layers for candidate generation. Infeasible or weak candidates generate feasibility and optimality cuts,
-\begin{equation}
+\begin{equation*}
 \theta \le \lambda^{\top}f\!\left(x^{(s)}\right)-\rho_s, \qquad s=1,\dots,S,
-\end{equation}
+\end{equation*}
 which are aggregated across scenarios to tighten the next master iteration.
 
 \noindent\textbf{Technical Stack and Implementation Path}\\
