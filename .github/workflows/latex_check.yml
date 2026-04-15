@@ -19,8 +19,17 @@ jobs:
       - name: Compile each changed file
         run: |
           # Get files changed in this PR compared to the base branch
-          FILES=$(git diff --name-only origin/${{ github.base_ref }} HEAD | grep '\.tex$' || true)
-          
+          # This logic handles both PRs and direct pushes
+          if [ "${{ github.event_name }}" == "pull_request" ]; then
+            # Compare PR head to the base branch
+            FILES=$(git diff --name-only origin/${{ github.base_ref }} HEAD | grep '\.tex$' || true)
+          else
+            # If it's a push, compare the current commit to the previous one
+            FILES=$(git diff --name-only HEAD^ HEAD | grep '\.tex$' || true)
+          fi
+
+          echo "files=$FILES" >> $GITHUB_OUTPUT
+                    
           if [ -z "$FILES" ]; then
             echo "No .tex files to compile."
             exit 0
