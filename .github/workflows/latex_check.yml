@@ -16,11 +16,12 @@ jobs:
         with:
           fetch-depth: 0 
 
-      - name: Setup Tectonic
+      - name: Install Tectonic
         run: |
-          # Use mamba to install tectonic quickly
-          sudo apt-get update
-          sudo apt-get install -y tectonic
+          # Official Tectonic installer script
+          curl --proto '=https' --tlsv1.2 -fsSL https://drop-sh.fullyjustified.net | sh
+          # Move it to a folder in the PATH
+          sudo mv tectonic /usr/local/bin/
 
       - name: Compile each changed file
         run: |
@@ -36,6 +37,15 @@ jobs:
           fi
 
           for file in $FILES; do
+            echo "--------------------------------------------------"
             echo "Compiling with Tectonic: $file"
+            echo "--------------------------------------------------"
+            
+            # Tectonic will download only the needed packages on the fly
             tectonic "$file"
+
+            if [ $? -ne 0 ]; then
+              echo "Error: $file failed to compile."
+              exit 1
+            fi
           done
