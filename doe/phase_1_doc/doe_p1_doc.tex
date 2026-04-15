@@ -64,7 +64,7 @@ The binary edge variables are linked to the partition decisions through standard
 \noindent\textbf{Technical Stack and Implementation Path}\\
 Qiskit is the quantum programming layer for the prototype. It is used to build problem-specific ansatzes, manage circuit parameters and shot budgets, and connect quantum samples to classical feasibility and optimization steps. The implementation starts on reduced utility test systems and scales by increasing candidate sites, scenario count, and cut complexity.
 
-The prototype will be validated against classical baselines on the same reduced instances, with the goal of showing better candidate quality and faster iteration on the same planning problems\footnote{Primary reference for this challenge: Nature Machine Intelligence article, \"https://www.nature.com/articles/s43588-025-00873-y\".}.
+The prototype will be validated against classical baselines on the same reduced instances, with the goal of showing better candidate quality and faster iteration on the same planning problems\footnote{Primary reference: Nature Machine Intelligence article, https://www.nature.com/articles/s43588-025-00873-y.}.
 
 \noindent\textbf{Conclusion}\\
 The proposed approach positions quantum methods as a targeted accelerator inside an existing planning pipeline, not as a replacement for grid-physics modeling. By combining Qiskit-based quantum search with rigorous classical feasibility analysis and multi-objective scenario aggregation, the team can move from concept to code quickly and establish a credible path to larger, decision-relevant grid-planning studies.
