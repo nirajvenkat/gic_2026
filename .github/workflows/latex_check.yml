@@ -4,8 +4,8 @@ on:
     paths:
       - '**.tex'
   push:
-      branches: [main]
-      paths: ['**.tex']
+    branches: [main]
+    paths: ['**.tex']
 
 jobs:
   build-changed-tex:
@@ -16,36 +16,35 @@ jobs:
         with:
           fetch-depth: 0 
 
+      # Tectonic setup is much faster than pulling a 5GB Docker image
+      - name: Setup Tectonic
+        uses: neowit/setup-tectonic@v1
+        with:
+          github_token: ${{ secrets.GITHUB_TOKEN }}
+
       - name: Compile each changed file
         run: |
-          # Get files changed in this PR compared to the base branch
-          # This logic handles both PRs and direct pushes
+          # Detect changed files based on trigger type
           if [ "${{ github.event_name }}" == "pull_request" ]; then
-            # Compare PR head to the base branch
             FILES=$(git diff --name-only origin/${{ github.base_ref }} HEAD | grep '\.tex$' || true)
           else
-            # If it's a push, compare the current commit to the previous one
+            # Handles direct pushes to main
             FILES=$(git diff --name-only HEAD^ HEAD | grep '\.tex$' || true)
           fi
 
-          echo "files=$FILES" >> $GITHUB_OUTPUT
-                    
           if [ -z "$FILES" ]; then
             echo "No .tex files to compile."
             exit 0
           fi
 
           for file in $FILES; do
-            echo "Compiling $file..."
+            echo "--------------------------------------------------"
+            echo "Compiling with Tectonic: $file"
+            echo "--------------------------------------------------"
             
-            # Get the directory of the file so we can run the command from there
-            # This ensures images/styles in that folder are found.
-            DIR=$(dirname "$file")
-            FILENAME=$(basename "$file")
-
-            docker run --rm -v "$(pwd):/workdir" -w "/workdir/$DIR" \
-              texlive/texlive:latest \
-              pdflatex -interaction=nonstopmode -halt-on-error "$FILENAME"
+            # Tectonic automatically handles multiple passes (bibtex, etc.) 
+            # and only downloads the packages you actually use.
+            tectonic "$file"
 
             if [ $? -ne 0 ]; then
               echo "Error: $file failed to compile."
