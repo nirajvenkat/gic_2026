@@ -250,8 +250,8 @@ ipython_config.py
 .pdf
 
 ## Only generated PDFs to be ignored
-doe/phase_1_doc/*.pdf
-mitsubishi/phase_1_doc/*.pdf
+doe/phase_1/phase_1_doc/*.pdf
+mitsubishi/phase_1/phase_1_doc/*.pdf
 
 ## Bibliography auxiliary files (bibtex/biblatex/biber):
 *.bbl
