@@ -1,6 +1,23 @@
 # MacOS filesystem
 .DS_Store
 
+# Model files
+*.pt
+*.pth
+*.ckpt
+*.h5
+*.pkl
+
+# Data folders
+datasets/
+data/
+
+# Python
+__pycache__/
+*.pyc
+
+# Jupyter
+.ipynb_checkpoints/
 # Byte-compiled / optimized / DLL files
 __pycache__/
 *.py[codz]
