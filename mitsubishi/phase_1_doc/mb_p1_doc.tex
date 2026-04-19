@@ -33,7 +33,7 @@
 \includegraphics[width=0.35\textwidth]{../img/4-Iodo-2-methylphenol.png}
 \vspace{0.25em}
 
-{\footnotesize Figure 1: 4-Iodo-2-methylphenol (IMePh) structure. Source: PubChem.\par}
+{\footnotesize Figure 1: 4-iodo-2-methylphenol (IMePh) structure. Source: PubChem.\par}
 \vfill
 {\large \textbf{Team Name} \par}
 \vspace{0.25in}
@@ -46,43 +46,34 @@ Niraj Venkat & MS/MBA Student and Researcher\\
 \end{titlepage}
 
 \noindent\textbf{Strategic Context}\\
-This Phase 1 concept addresses the core quantum-simulation bottleneck in EUV photoresist design: predicting the photoabsorption spectrum and the downstream electron-emission pathways that control lithographic blur. The solution is designed for utility-scale fault-tolerant quantum computers (FTQCs), not near-term NISQ devices, because the relevant observables require deeper circuits, richer excited-state structure, and more stable error budgets than can be expected from shallow prototypes. The goal is to keep the workflow implementation-ready while still framed at the level of a Phase 1 technical overview.
+This Phase 1 concept addresses the core quantum-simulation bottleneck in EUV photoresist design: predicting the photoabsorption spectrum and the downstream electron-emission pathways that control lithographic blur. The solution is designed for FTQCs, not near-term NISQ devices, because the relevant observables require deeper circuits, richer excited-state structure, and more stable error budgets than can be expected from shallow prototypes.
 
-\noindent\textbf{Proposed Solution Architecture}\\
-We propose a hybrid quantum-classical architecture centered on a Generative Quantum Eigensolver (GQE)-style search process. A generative model proposes compact circuit structures, and a hybrid training loop ranks them against target energy and transition metrics for a representative molecular target such as 4-Iodo-2-methylphenol. This architecture is intended to prioritize circuit families that can recover the EUV photoabsorption spectrum, low-lying excited states, and transition observables while remaining systematic enough to extend across chemically related molecules through materials-informatics transfer.
+\noindent\textbf{Proposed Solution}\\
+The proposed solution is a hybrid quantum-classical Generative Quantum Eigensolver (GQE) workflow: a generative model proposes compact circuit structures, and a hybrid training loop ranks them against target energy and transition metrics for 4-iodo-2-methylphenol (IMePh). It is designed to recover the EUV photoabsorption spectrum, low-lying excited states, and transition observables while remaining systematic enough to extend across chemically related molecules through materials-informatics transfer. Our deliverable will be a reproducible prototype that computes prioritized quantum-derived metrics for IMePh and related molecules, then returns a ranked candidate list for further study\footnote{Primary reference: K. Keithley et al., "Auger Spectroscopy via Generative Quantum Eigensolver: A Quantum Approach to Molecular Excitations," https://arxiv.org/abs/2603.12859v1}.
 
 \noindent\textbf{Quantum Modeling Workflow}\\
-The modeling workflow captures the key photophysical chain at a technical but not overly granular level: absorption of a 92 eV photon, attosecond photoionization, formation of a core-ionized state, femtosecond Auger decay, and the generation of primary, Auger, and secondary electrons. Those secondary electrons undergo inelastic scattering in the resist matrix and drive the chemistry that ultimately produces radiation-induced blur and line-edge roughness. Hamiltonians are constructed for candidate molecules, evaluated through differentiable quantum circuits, and updated as molecular geometry or active-space assumptions evolve. Results are organized for a materials-informatics handoff that ranks candidates by their predicted spectral and electron-emission behavior.
+This workflow follows the EUV photophysics chain from 92 eV photoionization through Auger decay and secondary-electron generation. Candidate Hamiltonians are evaluated with differentiable quantum circuits, and the results are used to rank molecules by predicted Auger electron yield and related emission behavior.
 
-We model each candidate with a second-quantized electronic Hamiltonian,
-\begin{equation*}
-\hat{H} = E_{\mathrm{core}} + \sum_{pq\sigma} h_{pq}\, a^{\dagger}_{p\sigma} a_{q\sigma}
-+ \frac{1}{2}\sum_{pqrs\sigma\tau} g_{pqrs}\, a^{\dagger}_{p\sigma} a_{q\sigma} a^{\dagger}_{r\tau} a_{s\tau},
-\end{equation*}
-then map to qubits using Jordan--Wigner so that \(\hat{H}=\sum_{\ell} c_{\ell} P_{\ell}\) with Pauli strings \(P_{\ell}\). The GQE policy samples an operator sequence from a learned pool,
+We model each candidate with a compact electronic Hamiltonian, map it to qubits using Jordan--Wigner, and evaluate operator sequences from a learned pool,
 \begin{equation*}
 \rho(\mathbf{j}) = U_{j_L}\cdots U_{j_1}\,\rho_0\,U_{j_1}^{\dagger}\cdots U_{j_L}^{\dagger},
 \qquad
 E(\mathbf{j}) = \mathrm{Tr}\!\left[\hat{H}\rho(\mathbf{j})\right],
 \end{equation*}
-and optimizes a sequence-level objective that biases lower-energy circuits,
+The GQE workflow then optimizes a sequence-level objective that biases lower-energy circuits,
 \begin{equation*}
 \mathcal{L}_{\mathrm{GQE}} = \left(\sum_{i=1}^{L} w_{j_i} - E(\mathbf{j})\right)^2.
 \end{equation*}
-For spectroscopy we estimate transition observables through the dipole response,
+For spectroscopy we estimate Auger-sensitive observables through the response,
 \begin{equation*}
-\sigma(\omega) \propto \omega\sum_{F\neq I}\sum_{\rho\in\{x,y,z\}}
-\frac{|\langle F|\hat{\mu}_{\rho}|I\rangle|^2\,\eta}{(E_F-E_I-\omega)^2+\eta^2},
+\Gamma(\omega) \propto \sum_{F\neq I}\frac{|\langle F|\hat{A}|I\rangle|^2\,\eta}{(E_F-E_I-\omega)^2+\eta^2},
 \end{equation*}
-which enables direct comparison to classical XAS reference spectra.
+which enables direct comparison to classical Auger reference spectra and emission-line trends.
 
 \noindent\textbf{Technical Stack and Implementation Path}\\
-PennyLane is the quantum programming framework for implementation. We will use PennyLane to build Hamiltonians from electronic-structure inputs, define differentiable quantum circuits, manage shot budgets, and run device-agnostic experiments across simulators and FTQC-oriented backends with mitigation hooks for noisy execution. The GQE workflow uses a classical generative model to propose ansatz sequences, then ranks them using measured observables and hybrid optimization. This provides a clean path from the example notebooks to a reproducible pipeline that can later be extended from a single target molecule to a small family of EUV-relevant compounds.
-
-\noindent\textbf{Expected Phase 1 Deliverable and Validation}\\
-Phase 1 delivers a reproducible prototype that computes a prioritized set of quantum-derived metrics for 4-iodo-2-methylphenol (IMePh) and a small set of related molecules, then returns a ranked candidate list for further study. Validation will compare key energies and transition observables against trusted classical references on tractable active spaces and assess whether the hybrid workflow preserves ranking quality while improving iteration speed\footnote{Primary implementation reference: K. Keithley et al., \"Auger Spectroscopy via Generative Quantum Eigensolver: A Quantum Approach to Molecular Excitations,\" arXiv:2603.12859v1 (2026), https://arxiv.org/abs/2603.12859v1.}. The emphasis is feasibility, reproducibility, and decision utility rather than full-spectrum photochemistry coverage.
+PennyLane is the implementation layer for Hamiltonian construction, differentiable circuits, shot management, and device-agnostic execution on simulators or FTQC-oriented backends. A classical generative model proposes ansatz sequences, and the GQE loop ranks them with measured observables, giving a reproducible path from the notebooks to a small family of EUV-relevant compounds.
 
 \noindent\textbf{Conclusion}\\
-This proposal establishes a pragmatic path from high-level concept to executable code by coupling GQE-style search with a PennyLane-based hybrid stack that is explicitly aligned to FTQC-scale requirements. The result is a coherent Phase 1 foundation for scalable quantum-enabled materials discovery: technically credible, implementation-oriented, and structured to hand off cleanly into future materials-informatics and photoresist-design workflows.
+This proposal couples GQE-style search with a PennyLane workflow for FTQC-scale materials discovery. Validation focuses on prioritized metrics and ranking quality against classical references on tractable active spaces, with the emphasis on feasibility, reproducibility, and decision utility.
 
 \end{document}
