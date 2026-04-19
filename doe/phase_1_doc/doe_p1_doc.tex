@@ -30,7 +30,7 @@
 {\large Date: \today \par}
 \vspace{0.25in}
 \centering
-\includegraphics[width=0.80\textwidth]{../img/microgrid_components.png}
+\includegraphics[width=0.80\textwidth]{../../img/microgrid_components.png}
 \vspace{0.25em}
 
 {\footnotesize Figure 1: Microgrid architecture and components. Source: S. Atcitty, U.S. Department of Energy presentation.\par}
@@ -41,32 +41,29 @@
 Name & Profession \\
 \hline
 Niraj Venkat & MS/MBA Student and Researcher\\
+Muskan Aman  &  Electrical Engineer\\
 \end{tabular}
 \vspace*{0.6in}
 \end{titlepage}
 
-\noindent\textbf{Strategic Context}\\
-This Phase 1 concept targets the fundamental computational bottleneck in grid modernization: solving large-scale mixed-integer nonlinear programming (MINLP) instances that determine where energy storage and microgrids should be deployed, how large they should be, and how they should operate under uncertainty. The candidate portfolio must satisfy nonlinear AC power-flow physics, contingency constraints, and multi-scenario cost and resilience trade-offs. We therefore frame the problem as a quantum-accelerated planning workflow that can explore feasible infrastructure portfolios faster than classical enumeration while preserving utility-grade validation.
+\noindent\textbf{Executive Summary}\\
+Our project addresses the challenge of resilient, cost-effective deployment of energy storage and microgrids under real grid constraints. The core difficulty is combinatorial: selecting locations, capacities, and operating designs across many scenarios while still honoring AC feasibility and reliability standards. We propose a hybrid workflow where quantum optimization accelerates the discrete planning search and classical solvers enforce physical validity. The framework is explicitly aligned to three outcomes: improved reliability/resilience, reduced lifecycle investment burden, and better operational voltage performance. The output is a ranked set of deployment portfolios with traceable trade-offs and utility-ready feasibility checks.
 
-\noindent\textbf{Proposed Solution}\\
-The proposed solution maps the discrete planning layer into Quadratic Unconstrained Binary Optimization (QUBO) and Ising Hamiltonian formulations so that binary siting, sizing, and topology decisions become native inputs to quantum search. Continuous dispatch variables, AC feasibility, and reliability constraints remain on classical solvers. This separation keeps the hardest combinatorial search in the quantum loop while preserving full-fidelity power-system validation in the classical loop. Our deliverable will be a working prototype that returns ranked siting and sizing portfolios, scenario-aware operating summaries, AC-feasibility certificates, and Pareto trade-off reports.
-
-\noindent\textbf{Hybrid Optimization Workflow}\\
-The iteration follows a Hybrid Quantum-Classical Benders Decomposition (HQCBD) workflow. Rather than a single-objective QUBO only, we use a Quantum-Assisted Multi-Objective Optimization (QAMOO) master in which weighted graph objectives are sampled and refined across scenarios:
+\noindent\textbf{High-level overview of proposed solution}\\
+Our approach uses a Quantum-Assisted Multi-Objective Optimization (QAMOO) loop\footnote{QAMOO reference: Nature Machine Intelligence article, https://www.nature.com/articles/s43588-025-00873-y.} and adapts the multi-objective design used in the Multiverse paper\footnote{Multiverse reference: https://doi.org/10.36227/techrxiv.175502655.52172592/v1.}. A key advantage is that these objectives are already quadratic, so the planning layer is QUBO/Ising-native and avoids quadratization overhead. For binary siting/sizing variables $x_i\in\{0,1\}$, the current surrogate objectives are:
 \begin{align*}
-\max_{x,e}\quad & \mathbf{\lambda}^{\top}\mathbf{f}(x) = \sum_{k=1}^{m} \lambda_k f_k(x),
-\qquad \sum_{k=1}^{m}\lambda_k = 1,\ \lambda_k\ge 0, \\
-f_k(x) &= \sum_{(i,j)\in E_k} w_{ij}^{(k)} e_{ij},
-\quad x_i\in\{0,1\},\ e_{ij}\in\{0,1\},
+C_{\rm R}(x) &= \sum_i \left(\alpha_i x_i^2 + \beta_i x_i + \gamma_i\right), \\
+C_{\rm I}(x) &= \sum_i \left(\eta_i x_i^2 + \theta_i x_i + \kappa_i\right), \\
+C_{\rm VC}(x) &= x^{\top}Q_{\rm VC}x + q_{\rm VC}^{\top}x + c.
 \end{align*}
-The binary edge variables are linked to the partition decisions through standard linear constraints. For each scenario, classical feasibility checks enforce AC limits and operating bounds, while the quantum loop explores candidate portfolios and refines the Pareto set through scenario-by-scenario sampling. Those candidates are then translated into the Ising representation used by the quantum optimizer, and infeasible or weak solutions produce feasibility and optimality cuts that tighten the next master iteration.
+Here, $C_{\rm R}$ captures resilience/reliability penalty, $C_{\rm I}$ captures capital investment behavior (including economies of scale), and $C_{\rm VC}$ captures voltage-control quality. QAMOO then explores the Pareto front directly across these competing objectives rather than forcing a single fixed preference.
 
-\noindent\textbf{Technical Stack and Implementation Path}\\
-Qiskit is the quantum programming layer for the prototype. It is used to build problem-specific ansatzes, manage circuit parameters and shot budgets, and connect quantum samples to classical feasibility and optimization steps. The implementation starts on reduced utility test systems and scales by increasing candidate sites, scenario count, and cut complexity.
+\noindent\textbf{Technical approach}\\
+Each candidate from the quantum loop is passed to classical AC power-flow and operating-feasibility checks (thermal limits, voltage bounds, and contingency screens). Infeasible candidates generate cuts and penalties for the next iteration; feasible candidates are retained as Pareto-efficient planning options. Qiskit's \verb|qiskit_addon_opt_mapper| is used for Hamiltonian construction, parameterized-circuit execution, and shot-based sampling, while classical solvers handle power-flow validation and scenario evaluation. Currently we exploit the simpler quadratic form for efficient QUBO execution; in follow-on work, Qiskit can ingest higher-order (HUBO) formulations when richer objectives are needed.
 
-The prototype will be validated against classical baselines on the same reduced instances, with the goal of showing better candidate quality and faster iteration on the same planning problems\footnote{Primary reference: Nature Machine Intelligence article, https://www.nature.com/articles/s43588-025-00873-y.}.
+\noindent\textbf{Projected industry impact}\\
+For energy stakeholders, this architecture provides a practical path to decision support at planning scale, not just an isolated quantum demo. First, utilities gain faster exploration of resilient infrastructure portfolios when outage and uncertainty dimensions are large. Second, planners receive transparent trade-offs between resilience, investment, and operational performance in a form compatible with existing integrated resource and distribution planning workflows. Third, the hybrid design preserves trust: every quantum-suggested portfolio is filtered through classical validation before recommendation.
 
-\noindent\textbf{Conclusion}\\
-The proposed approach positions quantum methods as a targeted accelerator inside an existing planning pipeline, not as a replacement for grid-physics modeling. By combining Qiskit-based quantum search with rigorous classical feasibility analysis and multi-objective scenario aggregation, the team can move from concept to code quickly and establish a credible path to larger, decision-relevant grid-planning studies.
+The long-term impact is a repeatable method for accelerating grid modernization decisions with measurable reliability and cost benefits.
 
 \end{document}
