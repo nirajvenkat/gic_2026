@@ -42,6 +42,7 @@
 Name & Profession & Role\\
 \hline
 Niraj Venkat & MS/MBA Student and Researcher & Project Manager / Team Coordinator \\
+Muskan Aman & Electrical Engineer & Data / Technical Lead \\
 \end{tabular}
 \vspace*{0.6in}
 \end{titlepage}
@@ -52,7 +53,7 @@ Our project targets a core bottleneck in advanced photoresist discovery: predict
 \noindent\textbf{High-level Overview of Proposed Solution}\\
 We use a GQE-driven workflow to prepare a reference state, extract excited-state information, and compute Auger response signatures for IMePh and related candidates. We execute the following steps:
 \begin{itemize}[leftmargin=*, itemsep=0pt, topsep=0pt, parsep=0pt, partopsep=0pt]
-  \item \underline{Ground-State Preparation:} Deploy a lightweight, purpose-built GQE that optimizes for circuit gate efficiency to generate state-preparation circuits for the IMePh ground state. The resulting circuits are then validated against the exact classical ground-state reference from Full Configuration Interaction (FCI).
+  \item \underline{Ground-State Preparation:} Sequence optimized state-preparation circuits for the IMePh ground state using a parameter-efficient Generative Quantum Eigensolver (GQE). By leveraging a Diffusion Transformer (DiT) rather than legacy autoregressive models, the architecture overcomes left-to-right bias to simultaneously capture non-local entanglement and global circuit topology. Output circuits are rigorously benchmarked for depth and fidelity against PySCF's exact Full Configuration Interaction (FCI) classical reference.
   \item \underline{Excited-State Extraction:} Apply the quantum self-consistent equation-of-motion (q-sc-EOM) method to obtain energies of the core-ionized $|\Psi_I\rangle$ and doubly-ionized $|\Psi_K\rangle$ states from the GQE reference.
   \item \underline{Auger Spectrum Calculation:} Compute the Auger transition rates using the one-centre approximation (OCA) to rank IMePh and related candidates by their EUV response signatures.
 \end{itemize}
@@ -74,6 +75,6 @@ where $R_{KI;csr}$ is the transition reduced density matrix connecting the initi
 Our hybrid stack uses PennyLane's \verb|qml.qchem| for Hamiltonian construction and CUDA-Q for state-vector simulation. $\Gamma_{KI}$ are calculated via classical post-processing using the OCA and OpenMolcas atomic integrals. Our results are validated against classical PySCF FCI baselines, or Selected CI for larger candidate molecules.
 
 \noindent\textbf{Projected Industry Impact}\\
-For semiconductor stakeholders, this hybrid workflow accelerates photoresist screening by bypassing the exponential scaling limits of classical methods for core-electron decay processes. By producing physics-grounded rankings for EUV absorption and subsequent electron emission, it enables faster candidate prioritization before committing to expensive wet-lab synthesis. Operating with approximately 50\% fewer logical gate counts than a standard VQE approach, GQE maintains strict hardware efficiency. This repeatable screening tool significantly reduces development cycles and improves R\&D capital efficiency in next-generation lithography.
+For semiconductor stakeholders, this hybrid workflow accelerates photoresist screening by bypassing the exponential scaling limits of classical methods for core-electron decay processes. By producing physics-grounded rankings for EUV absorption and subsequent electron emission, it enables faster candidate prioritization before committing to expensive wet-lab synthesis. This repeatable screening tool significantly reduces development cycles and improves R\&D capital efficiency in next-generation lithography.
 
 \end{document}
