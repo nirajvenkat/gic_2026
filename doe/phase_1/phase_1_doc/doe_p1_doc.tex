@@ -4,6 +4,7 @@
 \usepackage{iftex}
 \usepackage{amsmath,amssymb}
 \usepackage{graphicx}
+\usepackage{enumitem}
 
 \ifPDFTeX
   \usepackage[T1]{fontenc}
@@ -35,35 +36,41 @@
 
 {\footnotesize Figure 1: Microgrid architecture and components. Source: S. Atcitty, U.S. Department of Energy presentation.\par}
 \vfill
-{\large \textbf{Team Name} \par}
+{\large \textbf{Entangled Trio} \par}
 \vspace{0.25in}
 \begin{tabular}{lll}
-Name & Profession \\
+Name & Profession & Role\\
 \hline
-Niraj Venkat & MS/MBA Student and Researcher\\
-Muskan Aman  & Electrical Engineer \\
+Niraj Venkat & MS/MBA Student and Researcher & Project Manager / Team Coordinator \\
 \end{tabular}
 \vspace*{0.6in}
 \end{titlepage}
 
 \noindent\textbf{Executive Summary}\\
-Our project addresses the challenge of resilient, cost-effective deployment of energy storage and microgrids under real grid constraints. The core difficulty is combinatorial: selecting locations, capacities, and operating designs across many scenarios while still honoring AC feasibility and reliability standards. We propose a hybrid workflow where quantum optimization accelerates the discrete planning search and classical solvers enforce physical validity. The framework is explicitly aligned to three outcomes: improved reliability/resilience, reduced lifecycle investment burden, and better operational voltage performance. The output is a ranked set of deployment portfolios with traceable trade-offs and utility-ready feasibility checks.
+Our project addresses the challenge of resilient, cost-effective deployment of energy storage and microgrids under real grid constraints. The core difficulty is combinatorial: selecting locations, capacities, and operating designs across many scenarios while satisfying AC feasibility and reliability standards. We propose a hybrid workflow where quantum optimization accelerates the discrete planning search and classical solvers enforce physical validity. The framework is explicitly aligned to three outcomes: improved reliability/resilience, reduced lifecycle investment burden, and better operational voltage performance.
 
-\noindent\textbf{High-level overview of proposed solution}\\
-Our approach uses a Quantum-Assisted Multi-Objective Optimization (QAMOO) loop\footnote{QAMOO reference: Nature Machine Intelligence article, https://www.nature.com/articles/s43588-025-00873-y.} and adapts the multi-objective design used in the Multiverse paper\footnote{Multiverse reference: https://doi.org/10.36227/techrxiv.175502655.52172592/v1.}. A key advantage is that these objectives are already quadratic, so the planning layer is QUBO/Ising-native and avoids quadratization overhead. For binary siting/sizing variables $x_i\in\{0,1\}$, the current surrogate objectives are:
-\begin{align*}
-C_{\rm R}(x) &= \sum_i \left(\alpha_i x_i^2 + \beta_i x_i + \gamma_i\right), \\
-C_{\rm I}(x) &= \sum_i \left(\eta_i x_i^2 + \theta_i x_i + \kappa_i\right), \\
-C_{\rm VC}(x) &= x^{\top}Q_{\rm VC}x + q_{\rm VC}^{\top}x + c.
-\end{align*}
-Here, $C_{\rm R}$ captures resilience/reliability penalty, $C_{\rm I}$ captures capital investment behavior (including economies of scale), and $C_{\rm VC}$ captures voltage-control quality. QAMOO then explores the Pareto front directly across these competing objectives rather than forcing a single fixed preference.
+\noindent\textbf{High-level Overview of Proposed Solution}\\
+Our approach uses the Quantum-Assisted Multi-Objective Optimization (QAMOO) algorithm\footnote{QAMOO reference: Nature Machine Intelligence article, https://www.nature.com/articles/s43588-025-00873-y.} by IBM and adapts the multi-objective design framework from the Multiverse study\footnote{Multiverse reference: https://doi.org/10.36227/techrxiv.175502655.52172592/v1.}. 
 
-\noindent\textbf{Technical approach}\\
-Each candidate from the quantum loop is passed to classical AC power-flow and operating-feasibility checks (thermal limits, voltage bounds, and contingency screens). Infeasible candidates generate cuts and penalties for the next iteration; feasible candidates are retained as Pareto-efficient planning options. Qiskit's \verb|qiskit_addon_opt_mapper| is used for Hamiltonian construction, parameterized-circuit execution, and shot-based sampling, while classical solvers handle power-flow validation and scenario evaluation. Currently we exploit the simpler quadratic form for efficient QUBO execution; in follow-on work, Qiskit can ingest higher-order (HUBO) formulations when richer objectives are needed.
+For binary siting/sizing variables $x_i\in\{0,1\}$, the three currently proposed objectives are:
+$$
+C_{\rm R}(x) = \sum_i \left(\alpha_i x_i^2 + \beta_i x_i + \gamma_i\right),\quad
+C_{\rm I}(x) = \sum_i \left(\eta_i x_i^2 + \theta_i x_i + \kappa_i\right),\quad
+C_{\rm VC}(x) = x^{\intercal}Q_{\rm VC}x + q_{\rm VC}^{\intercal}x + c.
+$$
+Here, $C_{\rm R}$ captures resilience/reliability penalty, $C_{\rm I}$ captures capital investment behavior (including economies of scale), and $C_{\rm VC}$ captures voltage-control quality.
 
-\noindent\textbf{Projected industry impact}\\
-For energy stakeholders, this architecture provides a practical path to decision support at planning scale, not just an isolated quantum demo. First, utilities gain faster exploration of resilient infrastructure portfolios when outage and uncertainty dimensions are large. Second, planners receive transparent trade-offs between resilience, investment, and operational performance in a form compatible with existing integrated resource and distribution planning workflows. Third, the hybrid design preserves trust: every quantum-suggested portfolio is filtered through classical validation before recommendation.
+Some key advantages of our approach:
+\begin{itemize}[leftmargin=*, itemsep=0pt, topsep=0pt, parsep=0pt, partopsep=0pt]
+  \item \underline{Hardware-Efficient Scaling:} Purely quadratic objectives bypass the severe ancilla penalties of quadratization, while the framework natively accommodates decomposition strategies like Birkhoff, Benders and Progressive Hedging to maintain QUBO efficiency when scaling to complex multi-scenario constraints.
+  \item \underline{Native Pareto Exploration:} QAMOO samples the $(N-1)$-dimensional Pareto front of $N$ competing objectives in superposition, bypassing the need for single-objective QUBO solvers to manually adjust scalarized weights (Lagrange multipliers) and restart from scratch.
+  \item \underline{Bypassing Classical Bottlenecks:} While state-of-the-art exact classical methods (like DPA) are computationally bottlenecked by having to iteratively solve hundreds of discrete, scalarized subproblems, QAMOO maps the optimal trade-off surface within a single variational execution.
+\end{itemize}
 
-The long-term impact is a repeatable method for accelerating grid modernization decisions with measurable reliability and cost benefits.
+\noindent\textbf{Technical Approach}\\
+For the quantum execution layer, we stack Qiskit's \verb|qiskit_addon_opt_mapper| for Hamiltonian formulation, the \verb|qaoa-training-pipeline| for utility-scale parameter optimization, and \verb|Samplomatic| for error-mitigated shot sampling. Candidate portfolios undergo classical \verb|pandapower| AC power-flow validation to filter thermal/contingency violations. Our preliminary IEEE 33-bus simulations confirm these engines efficiently translate complex AC voltage routing into native, purely quadratic QUBO coefficients for $Q_{\rm VC}$. To rigorously demonstrate quantum advantage, we benchmark QAMOO's hypervolume convergence and time-to-solution against the classical Defining Point Algorithm (DPA). For exact multi-objective integer programming, DPA provably converges to the optimal Pareto front.
+
+\noindent\textbf{Projected Industry Impact}\\
+This framework delivers practical decision support at grid-planning scale. Utilities gain faster, hardware-efficient exploration of resilient infrastructure portfolios amidst large-scale, multi-dimensional outage uncertainties. Crucially, planners receive transparent Pareto trade-offs of resilience, capital investment, and operational performance in formats fully compatible with existing workflows. Because classical power-flow engines validate all quantum-generated portfolios before final recommendation, operational trust is natively preserved. Ultimately, this scalable method promises to accelerate complex grid modernization with rigorous, benchmarked cost-reliability benefits.
 
 \end{document}
