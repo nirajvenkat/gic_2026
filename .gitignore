@@ -249,9 +249,22 @@ ipython_config.py
 ## Generated if empty string is given at "Please type another file name for output:"
 .pdf
 
+## QChem datasets
+*.h5
+
 ## Only generated PDFs to be ignored
-doe/phase_1/phase_1_doc/*.pdf
-mitsubishi/phase_1/phase_1_doc/*.pdf
+doe/phase_1/doc/*.pdf
+mitsubishi/phase_1/doc/*.pdf
+doe/phase_2/doc/*.pdf
+mitsubishi/phase_2/doc/*.pdf
+
+## Dataset and auxiliary files
+mitsubishi/external/code/data
+mitsubishi/external/code/datasets
+mitsubishi/external/code/runs
+mitsubishi/external/code/seq_*
+mitsubishi/phase_2/code/datasets
+mitsubishi/phase_2/code/seq_*
 
 ## Bibliography auxiliary files (bibtex/biblatex/biber):
 *.bbl
