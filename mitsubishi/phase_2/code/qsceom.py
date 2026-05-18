@@ -588,6 +588,7 @@ def qscEOM(
     active_electrons: int,
     active_orbitals: int,
     charge: int,
+    mult: int = 1,
     params=None,
     ash_excitation=None,
     *,
@@ -787,6 +788,7 @@ def qscEOM(
             active_electrons=active_electrons,
             active_orbitals=active_orbitals,
             charge=charge,
+            mult=mult,
         )
         if pauli_grouping and hasattr(H, "compute_grouping"):
             H.compute_grouping(grouping_type=grouping_type)
