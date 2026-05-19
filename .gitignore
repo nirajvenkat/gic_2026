@@ -258,6 +258,11 @@ mitsubishi/phase_1/doc/*.pdf
 doe/phase_2/doc/*.pdf
 mitsubishi/phase_2/doc/*.pdf
 
+# Ignore .ipynb files in the code directories, since these are handled by jupytext
+doe/phase_2/code/*.ipynb
+mitsubishi/phase_2/code/*.ipynb
+
+
 ## Dataset and auxiliary files
 mitsubishi/external/code/data
 mitsubishi/external/code/datasets
