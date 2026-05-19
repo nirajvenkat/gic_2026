@@ -9,8 +9,20 @@
 #       format_name: percent
 #       format_version: '1.3'
 #       jupytext_version: 1.19.3
+#   kernelspec:
+#     display_name: qi
+#     language: python
+#     name: python3
 #   language_info:
+#     codemirror_mode:
+#       name: ipython
+#       version: 3
+#     file_extension: .py
+#     mimetype: text/x-python
 #     name: python
+#     nbconvert_exporter: python
+#     pygments_lexer: ipython3
+#     version: 3.13.9
 # ---
 
 # %% [markdown]
@@ -37,6 +49,7 @@ import numpy as np
 import pandas as pd
 import networkx as nx
 import matplotlib.pyplot as plt
+import shutil
 import pandapower.networks as nw
 import pandapower.topology as top
 
@@ -46,6 +59,160 @@ from qamoo.algorithms.qaoa import *
 from qamoo.utils.data_structures import ProblemGraphBuilder
 
 from qiskit_aer import AerSimulator
+
+
+def _problem_set_dir(data_root: str, num_buses: int, num_objectives: int, num_swap_layers: int = 0, problem_id: int = 0):
+    return os.path.join(
+        data_root,
+        'problems',
+        f'{num_buses}q',
+        f'problem_set_{num_buses}q_{num_swap_layers}s_{num_objectives}o_{problem_id}',
+    )
+
+
+def _prepare_benders_data_root(source_problem_dir: str, source_data_root: str, target_data_root: str, num_buses: int, num_objectives: int, objective_weights_file: str):
+    target_problem_dir = _problem_set_dir(target_data_root, num_buses, num_objectives)
+    os.makedirs(os.path.dirname(target_problem_dir), exist_ok=True)
+    shutil.copytree(source_problem_dir, target_problem_dir, dirs_exist_ok=True)
+
+    # Mirror support files required by QAMOO.
+    os.makedirs(os.path.join(target_data_root, 'objective_weights'), exist_ok=True)
+    if os.path.exists(objective_weights_file):
+        shutil.copy2(objective_weights_file, os.path.join(target_data_root, 'objective_weights', os.path.basename(objective_weights_file)))
+
+    # Use the same lower/upper bounds as the native run.
+    for bounds_name, bounds_value in [('lower_bounds.json', [0.0, 0.0, 0.0]), ('upper_bounds.json', [100.0, 100.0, 100.0])]:
+        with open(os.path.join(target_problem_dir, bounds_name), 'w') as f:
+            json.dump(bounds_value, f)
+
+    return target_problem_dir
+
+
+def _run_benders_qamoo_preprocessor(num_qubits: int, problem_dir: str, num_objectives: int, max_iters: int = 10):
+    from qamoo.algorithms.benders import classical_benders, cut_to_qubo_penalty
+
+    print("Running classical Benders prototype to collect initial cuts...")
+    res = classical_benders(num_qubits, problem_dir, num_objectives, max_iters=max_iters)
+    cuts = res.get('cuts', [])
+    print(f"Collected {len(cuts)} initial cuts")
+
+    pg = ProblemGraphBuilder(num_qubits)
+    base_graph = pg.deserialize(os.path.join(problem_dir, 'problem_graph_0.json'))
+
+    for cut in cuts:
+        pvec = cut_to_qubo_penalty(cut, num_qubits, penalty_weight=10.0)
+        for i, w in enumerate(pvec.tolist()):
+            if w == 0:
+                continue
+            if base_graph.has_edge(i, i):
+                base_graph[i][i]['weight'] += float(w)
+            else:
+                base_graph.add_edge(i, i, weight=float(w))
+
+    target_dir = os.path.join(problem_dir, 'benders_qamoo')
+    os.makedirs(target_dir, exist_ok=True)
+
+    pg.num_nodes = num_qubits
+    pg.graph = base_graph
+    pg.serialize('problem_graph_0', target_dir)
+
+    for idx in range(1, num_objectives):
+        src = os.path.join(problem_dir, f'problem_graph_{idx}.json')
+        dst = os.path.join(target_dir, f'problem_graph_{idx}.json')
+        if os.path.exists(src):
+            with open(src, 'r') as fsrc, open(dst, 'w') as fdst:
+                fdst.write(fsrc.read())
+
+    for bounds_name, bounds_value in [('lower_bounds.json', [0.0, 0.0, 0.0]), ('upper_bounds.json', [100.0, 100.0, 100.0])]:
+        src = os.path.join(problem_dir, bounds_name)
+        dst = os.path.join(target_dir, bounds_name)
+        if os.path.exists(src):
+            shutil.copy2(src, dst)
+        else:
+            with open(dst, 'w') as f:
+                json.dump(bounds_value, f)
+
+    print(f"Wrote modified problem set with penalties to {target_dir}")
+    return target_dir
+
+
+def _train_qaoa_parameters(problem_folder: str, p_layers: int, num_objectives: int):
+    objective_graphs = [
+        ProblemGraphBuilder.deserialize(os.path.join(problem_folder, f'problem_graph_{idx}.json'))
+        for idx in range(num_objectives)
+    ]
+    graph_edges = list(objective_graphs[0].edges())
+
+    combined_edges = []
+    for u, v in graph_edges:
+        combined_weight = sum(pg[u][v]['weight'] for pg in objective_graphs) / float(num_objectives)
+        combined_edges.append((u, v, combined_weight))
+
+    combined_graph = nx.Graph()
+    combined_graph.add_weighted_edges_from(combined_edges)
+    ising, _ = Maxcut(combined_graph).to_quadratic_program().to_ising()
+
+    ansatz = QAOAAnsatz(ising, reps=p_layers)
+    estimator = AerEstimator(
+        backend_options={"method": "matrix_product_state", "matrix_product_state_max_bond_dimension": 20},
+        run_options={"shots": 1024},
+    )
+
+    def cost_func(params):
+        bound_ansatz = ansatz.assign_parameters(params)
+        job = estimator.run([bound_ansatz], [ising])
+        return -job.result().values[0]
+
+    np.random.seed(42)
+    init_guess = np.random.uniform(-np.pi, np.pi, 2 * p_layers)
+    res = minimize(cost_func, init_guess, method='COBYLA', options={'maxiter': 60})
+    trained_params = res.x.tolist()
+
+    with open(os.path.join(problem_folder, 'optimal_parameters.json'), 'w') as f:
+        json.dump({str(p_layers): trained_params}, f)
+
+    return trained_params
+
+
+def _run_qamoo_workflow(data_root: str, run_id: str, num_buses: int, num_objectives: int, num_samples: int, p_layers: int):
+    backend = AerSimulator(method='matrix_product_state', matrix_product_state_max_bond_dimension=20, max_parallel_threads=1)
+    backend.options.use_fractional_gates = False
+
+    problem = ProblemSpecification()
+    problem.data_folder = data_root
+    problem.num_qubits = num_buses
+    problem.num_objectives = num_objectives
+    problem.num_swap_layers = 0
+    problem.problem_id = 0
+
+    _train_qaoa_parameters(problem.problem_folder, p_layers, num_objectives)
+
+    config = QAOAConfig()
+    config.p = p_layers
+    config.num_samples = num_samples
+    config.shots = 4096
+    config.objective_weights_id = 0
+    config.backend_name = backend.name
+    config.initial_layout = None
+    config.run_id = run_id
+    config.rep_delay = 0.0001
+    config.problem = problem
+
+    print(f"Preparing parameterized QAOA circuits for {run_id}...")
+    prepare_qaoa_circuits(config, backend, overwrite_results=True)
+
+    print(f"Transpiling QAOA circuits for {run_id}...")
+    transpile_qaoa_circuits_parametrized(config, backend)
+
+    print(f"Executing sampled circuits for {run_id}...")
+    batch_execute_qaoa_circuits_parametrized([config], backend)
+
+    return config
+
+# Feature toggles
+# If True, attempt to use IBM Quantum runtime for QAOA execution. Defaults
+# to False (use AerSimulator). Enabling requires IBM account/runtime setup.
+USE_QPU = False
 
 # %% [markdown]
 # ## 1. Grid Loading and Objective Graph Serialization
@@ -86,15 +253,25 @@ for idx, weights in enumerate([obj1_weights, obj2_weights, obj3_weights]):
 
 print(f"Serialized {num_buses}-qubit problem graphs to {problem_dir}")
 
+# Shared experiment settings for both the native and Benders-QAMOO runs.
+num_samples = 10
+num_objectives = 3
+p_layers = 3
+
+# Run the Benders-QAMOO preprocessor which writes a modified problem set
+# with simple Benders cuts converted to QUBO penalties. This is kept inline
+# so the notebook remains self-contained.
+try:
+    _run_benders_qamoo_preprocessor(num_buses, problem_dir, num_objectives, max_iters=5)
+    print("Benders-QAMOO preprocessing complete — modified problem set written under <original>/benders_qamoo/")
+except Exception as e:
+    print(f"Benders-QAMOO preprocessing failed: {e}")
+
 # %% [markdown]
 # ## 2. Generate Configuration Placeholders & Train QAOA
 # QAMOO requires valid `optimal_parameters.json` and objective weights distributions for Multi-Objective optimization. We use COBYLA to optimize a scalarized representation of the 3 objectives.
 
 # %%
-num_samples = 10
-num_objectives = 3
-p_layers = 3
-
 # Lower and Upper bounds for the 3 objectives
 with open(os.path.join(problem_dir, 'lower_bounds.json'), 'w') as f:
     json.dump([0.0, 0.0, 0.0], f)
@@ -147,42 +324,49 @@ with open(weights_file, 'w') as f:
 
 print("Generated parameter weights.")
 
+# Mirror the Benders-modified problem set and support files into a second data root
+# so the same QAMOO workflow can be executed on the Benders-QAMOO instance.
+benders_data_root = './data_benders/'
+benders_source_problem_dir = os.path.join(problem_dir, 'benders_qamoo')
+benders_problem_dir = _prepare_benders_data_root(
+    benders_source_problem_dir,
+    './data/',
+    benders_data_root,
+    num_buses,
+    num_objectives,
+    weights_file,
+)
+
+print(f"Prepared Benders-QAMOO data root at {benders_problem_dir}")
+
 # %% [markdown]
 # ## 3. QAOA Setup and Execution
 
 # %%
-# Set up Qiskit Backend
-backend = AerSimulator(method='matrix_product_state', matrix_product_state_max_bond_dimension=20, max_parallel_threads=1)
-backend.options.use_fractional_gates = False
+native_data_root = './data/'
+benders_data_root = './data_benders/'
 
-# QAMOO Problem Specification
-problem = ProblemSpecification()
-problem.data_folder = './data/'
-problem.num_qubits = num_buses
-problem.num_objectives = num_objectives
-problem.num_swap_layers = 0
-problem.problem_id = 0
+print("Running native QAMOO workflow...")
+config = _run_qamoo_workflow(
+    native_data_root,
+    'siting_run_native',
+    num_buses,
+    num_objectives,
+    num_samples,
+    p_layers,
+)
+problem = config.problem
 
-# QAMOO QAOA Configuration
-config = QAOAConfig()
-config.p = p_layers
-config.num_samples = num_samples
-config.shots = 4096
-config.objective_weights_id = 0
-config.backend_name = backend.name
-config.initial_layout = None
-config.run_id = 'siting_run'
-config.rep_delay = 0.0001
-config.problem = problem
-
-print("Preparing parameterized QAOA circuits...")
-prepare_qaoa_circuits(config, backend, overwrite_results=True)
-
-print("Transpiling QAOA circuits for target backend...")
-transpile_qaoa_circuits_parametrized(config, backend)
-
-print("Executing sampled circuits (this might take a moment)...")
-batch_execute_qaoa_circuits_parametrized([config], backend)
+print("Running Benders-QAMOO workflow...")
+benders_config = _run_qamoo_workflow(
+    benders_data_root,
+    'siting_run_benders',
+    num_buses,
+    num_objectives,
+    num_samples,
+    p_layers,
+)
+benders_problem = benders_config.problem
 
 # %% [markdown]
 # ## 4. Hypervolume Analysis
@@ -194,16 +378,22 @@ steps = range(0, config.total_num_samples + 1, step_size)
 
 try:
     compute_hypervolume_progress(problem.problem_folder, config.results_folder, steps)
-    x, y = config.progress_x_y()
-    
-    print(f"Max Hypervolume: {max(y):.2f}")
-    
+    compute_hypervolume_progress(benders_problem.problem_folder, benders_config.results_folder, steps)
+
+    native_x, native_y = config.progress_x_y()
+    benders_x, benders_y = benders_config.progress_x_y()
+
+    print(f"Max Hypervolume (native QAMOO): {max(native_y):.2f}")
+    print(f"Max Hypervolume (Benders-QAMOO): {max(benders_y):.2f}")
+
     plt.figure(figsize=(8, 5))
-    plt.plot(x, y, marker='o')
+    plt.plot(native_x, native_y, marker='o', label='Native QAMOO')
+    plt.plot(benders_x, benders_y, marker='s', label='Benders-QAMOO')
     plt.title(f'Hypervolume Progress - Siting Optimization ({net.name})')
     plt.xlabel('Samples Evaluated')
     plt.ylabel('Hypervolume')
     plt.grid(True)
+    plt.legend()
     plt.show()
 except Exception as e:
     print(f"Evaluation encountered an issue: {e}")
@@ -362,72 +552,7 @@ except Exception as e:
 
 
 # %% [markdown]
-# ## 6. Discrepancy Table
-# Visualizing the Hypervolume differences between Quantum and Classical methods.
-
-# %%
-try:
-    q_hv = max(y)
-except Exception:
-    q_hv = 0.0
-
-# Compute Exact Classical HV
-from pymoo.indicators.hv import HV
-from IPython.display import display
-
-def _as_points(a, m):
-    a = np.asarray(a, dtype=float)
-    if a.size == 0:
-        return np.empty((0, m), dtype=float)
-    return a.reshape(-1, m)
-
-cplex_pts = _as_points(classical_nd_points, num_objectives)
-dpa_pts = _as_points(dpa_nd_points, num_objectives)
-
-# Convert max-objective points to minimization space for pymoo HV
-cplex_min = -cplex_pts if len(cplex_pts) else cplex_pts
-dpa_min = -dpa_pts if len(dpa_pts) else dpa_pts
-
-if len(cplex_min) or len(dpa_min):
-    all_min = np.vstack([p for p in [cplex_min, dpa_min] if len(p)])
-    ref_point = np.max(all_min, axis=0) + 1e-6
-else:
-    ref_point = np.ones(num_objectives)
-
-ind = HV(ref_point=ref_point)
-cplex_hv = float(ind(cplex_min)) if len(cplex_min) else 0.0
-dpa_hv = float(ind(dpa_min)) if len(dpa_min) else 0.0
-
-table_data = {
-    "Method": ["QAMOO (Quantum QAOA)", "CPLEX (Classical Exact)", "DPA (Classical Exact)"],
-    "Hypervolume": [q_hv, cplex_hv, dpa_hv],
-    "Discrepancy (vs Exact)": [f"{((dpa_hv - q_hv) / dpa_hv) * 100:.2f}%" if dpa_hv > 0 else "N/A", f"{((dpa_hv - cplex_hv) / dpa_hv) * 100:.2f}%" if dpa_hv > 0 else "N/A", "0.00%"]
-}
-
-df_comparison = pd.DataFrame(table_data)
-print("\n=== Quantum vs Classical Comparison ===")
-print(f"DPA ND points count: {len(dpa_pts)}")
-
-# Create a readable notebook table view
-df_view = df_comparison.copy()
-df_view["Hypervolume"] = df_view["Hypervolume"].map(lambda v: f"{v:,.4f}")
-
-styled = (
-    df_view.style
-    .hide(axis="index")
-    .set_properties(**{"text-align": "center", "padding": "8px", "font-size": "12pt"})
-    .set_table_styles([
-        {"selector": "th", "props": "text-align:center; font-size:12pt; font-weight:bold; background-color:#f2f2f2;"},
-        {"selector": "td", "props": "border:1px solid #dddddd;"},
-        {"selector": "table", "props": "border-collapse:collapse; width:100%;"},
-    ])
-    .set_caption("Quantum vs Classical Hypervolume Summary")
-)
-
-display(styled)
-
-# %% [markdown]
-# ## 7. Configuration Visualization
+# ## 6. Configuration Visualization
 # Visualizing the physical grid mapping for a selected optimal microgrid siting solution from the quantum Pareto front using `rustworkx`.
 
 # %%
@@ -467,7 +592,7 @@ except Exception as e:
     print(f"Could not render visualization. Error: {e}")
 
 # %% [markdown]
-# ## 8. Multi-Metric Pareto Quality Analysis
+# ## 7. Multi-Metric Pareto Quality Analysis
 # The single discrepancy percentage is limited, so we add standard multi-objective indicators from optimization literature.
 #
 # - **Hypervolume (HV)**: volume dominated by a Pareto set w.r.t. a reference point (higher is better in our maximization setting after conversion).
@@ -569,22 +694,25 @@ def _try_load_quantum_points(results_folder, m):
 cplex_pts = _as_points(classical_nd_points, num_objectives)
 dpa_pts = _as_points(dpa_nd_points, num_objectives)
 q_pts = _try_load_quantum_points(config.results_folder, num_objectives)
+benders_q_pts = _try_load_quantum_points(benders_config.results_folder, num_objectives)
 
 # Convert to minimization space for standard indicators
 cplex_min = _to_min(cplex_pts)
 dpa_min = _to_min(dpa_pts)
 q_min = _to_min(q_pts)
+benders_q_min = _to_min(benders_q_pts)
 
 # Exact reference: union of exact methods when available
 exact_union_min = np.vstack([p for p in [cplex_min, dpa_min] if len(p)]) if (len(cplex_min) or len(dpa_min)) else np.empty((0, num_objectives))
 
 # HV reference point from all available methods to keep scale comparable
-all_min = np.vstack([p for p in [q_min, cplex_min, dpa_min] if len(p)]) if (len(q_min) or len(cplex_min) or len(dpa_min)) else np.empty((0, num_objectives))
+all_min = np.vstack([p for p in [q_min, benders_q_min, cplex_min, dpa_min] if len(p)]) if (len(q_min) or len(benders_q_min) or len(cplex_min) or len(dpa_min)) else np.empty((0, num_objectives))
 ref_point = np.max(all_min, axis=0) + 1e-6 if len(all_min) else np.ones(num_objectives)
 hv = HV(ref_point=ref_point)
 
 methods = [
     ("QAMOO (Quantum)", q_min),
+    ("Benders-QAMOO (Quantum)", benders_q_min),
     ("CPLEX (Exact WS)", cplex_min),
     ("DPA (Exact)", dpa_min),
 ]
@@ -622,7 +750,7 @@ styled = (
 )
 
 print("\n=== Multi-Metric Pareto Quality Summary ===")
-print(f"QAMOO points: {len(q_pts)}, CPLEX points: {len(cplex_pts)}, DPA points: {len(dpa_pts)}")
+print(f"QAMOO points: {len(q_pts)}, Benders-QAMOO points: {len(benders_q_pts)}, CPLEX points: {len(cplex_pts)}, DPA points: {len(dpa_pts)}")
 if len(dpa_pts) == 0:
     print("Note: DPA points are empty, so DPA metrics will be degenerate (HV=0 and many N/A).")
 display(styled)
