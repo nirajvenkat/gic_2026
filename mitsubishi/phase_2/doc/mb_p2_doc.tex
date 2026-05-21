@@ -48,7 +48,7 @@ To prepare high-fidelity reference states, we use a Generative Quantum Eigensolv
 \end{equation}
 where $U(\mathbf{j}) = U_{j_L}\cdots U_{j_1}$ represents a sequence of $L$ quantum gates selected from a discrete gate pool. We developed two model configurations in PyTorch to output these sequence tokens: (1) \textbf{GPTQE}, a causal autoregressive transformer based on nanoGPT, and (2) \textbf{DiTQE}, a Diffusion Transformer where the final target energy acts as a continuous condition. DiTQE uses multi-headed self-attention with adaptive RMSNorm to modulate token embeddings, overcoming left-to-right biases and capturing global circuit topology.
 
-The model is trained using AdamW to minimize the loss $\mathcal{L} = \frac{1}{B} \sum_{b=1}^B \sum_{t=1}^L \left( \sum_{i=1}^t \text{logit}_{j_i} - E(\mathbf{j}_{1:t}) \right)^2 + \beta \sum_{t=1}^L \max(0, E_{\rm FCI} - E(\mathbf{j}_{1:t}))^2$, where the penalty parameter $\beta = 10.0$ prevents the predicted energy values from dipping below the exact Full Configuration Interaction (FCI) ground-state energy.
+The model is trained using AdamW to minimize the loss $\mathcal{L}$, where the penalty parameter $\beta$ prevents the predicted energy values from dipping below the exact Full Configuration Interaction (FCI) ground-state energy.
 
 \subsection{Excited-State Extraction via q-sc-EOM}
 After GQE identifies the optimal state-preparation circuit sequence, we use the compiled reference state $|0\rangle = U_{\rm GQE}|{\rm HF}\rangle$ as the vacuum for the q-sc-EOM solver. We run the algorithm over two channels:
@@ -56,7 +56,7 @@ After GQE identifies the optimal state-preparation circuit sequence, we use the 
   \item \textbf{Ionization Potential (IP) Space:} Computes core-ionized states (doublet multiplicity, $N-1$ electrons) representing the initial core-hole state $|\Psi_I\rangle$.
   \item \textbf{Double Ionization Potential (DIP) Space:} Computes doubly-ionized states (singlet multiplicity, $N-2$ electrons) representing the final double-hole states $|\Psi_K\rangle$.
 \end{enumerate}
-We solve the equation-of-motion secular equation under the double commutator approximation, $\langle 0 | [\delta O, [\hat{H}, O_n^\dagger]] | 0 \rangle = \omega_n \langle 0 | [\delta O, O_n^\dagger] | 0 \rangle$ (where $\delta O$ is a variation of the excitation operator), in an STO-3G basis set to obtain the transition energies $\omega_n$ and excited state energies $E_I$ and $E_K$.
+We solve the equation-of-motion secular equation under the double commutator approximation, in an STO-3G basis set to obtain the transition energies $\omega_n$ and excited state energies $E_I$ and $E_K$.
 
 \subsection{Minimal Basis Projection and Transition RDM}
 The One-Center Approximation (OCA) assumes that Auger decay rates are dominated by transition matrix elements centered on the emitter atom (Oxygen, index 0). First, we project the full molecular orbital coefficients $C$ onto the minimal basis set (MBS) of the Oxygen emitter via $D = T^{-1} U C$, where $T_{\mu\nu} = \langle \chi_\mu | \chi_\nu \rangle$ is the MBS overlap matrix and $U_{\mu\kappa} = \langle \chi_\mu | \phi_\kappa \rangle$ is the overlap between the MBS and the full basis, yielding projected coefficients $D$ of shape $N_{\rm MBS} \times N_{\rm orb}$.
