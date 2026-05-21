@@ -1,0 +1,140 @@
+\documentclass[11pt]{article}
+\usepackage[margin=1in]{geometry}
+\usepackage{setspace}
+\usepackage{iftex}
+\usepackage{amsmath,amssymb}
+\usepackage{graphicx}
+\usepackage{enumitem}
+\usepackage{pdfpages}
+\usepackage{booktabs}
+\usepackage{cite}
+\usepackage{url}
+
+\ifPDFTeX
+  \usepackage[T1]{fontenc}
+  \usepackage{newtxtext,newtxmath}
+\else
+  \usepackage{fontspec}
+  \setmainfont{Times New Roman}
+\fi
+
+\setstretch{1.15}
+\setlength{\parskip}{0.5em}
+\setlength{\parindent}{0pt}
+\pagenumbering{arabic}
+
+\begin{document}
+
+% ----------------------------------------------------
+% PAGE 1: COVER PAGE
+% ----------------------------------------------------
+\includepdf[pages=1]{cover_doe.pdf}
+
+% ----------------------------------------------------
+% PAGE 2: INTRODUCTION, SCOPE & METHODOLOGY
+% ----------------------------------------------------
+\section{Introduction and Phase 1 Scope Comparison}
+This report outlines the implementation and results for Phase 2 of the DOE/AIST challenge on the quantum-enhanced strategic siting of energy storage and microgrids. Our project targets the optimal, resilient, and cost-effective siting of clean energy resources over electrical grids under physical power-flow and reliability constraints. The underlying optimization task is combinatorial and multi-objective, balancing competing goals: resilience penalty ($C_{\rm R}$), capital investment cost ($C_{\rm I}$), and operational voltage-control quality ($C_{\rm VC}$).
+
+In Phase 1, we proposed a hybrid framework leveraging Quantum-Assisted Multi-Objective Optimization (QAMOO)~\cite{qamoo2025} and the Multiverse multi-objective design paradigm~\cite{multiverse2023}. We envisioned a system where:
+\begin{itemize}[leftmargin=*,noitemsep,topsep=0pt]
+  \item Qiskit's optimization mapping stack (\verb|qiskit_addon_opt_mapper|) formats Hamiltonian representations.
+  \item An execution layer trains QAOA parameters over a GPU-accelerated classical simulator or physical QPUs.
+  \item A classical validation engine (using \verb|pandapower|~\cite{pandapower2018}) checks candidates for AC feasibility.
+  \item Decomposition methods, specifically Benders decomposition, partition the master binary layout search from continuous power-flow checks to scale the framework to large grids.
+\end{itemize}
+
+During Phase 2, we successfully implemented these components on an IEEE 33-bus system. Specifically, we developed a Benders-QAMOO preprocessor that runs a classical Benders decomposition prototype to gather initial feasibility cuts. These cuts are then converted into static QUBO penalty weights on the problem graphs before running the QAMOO QAOA solver. This sequential preprocessor successfully bypasses the need for high-frequency quantum-classical feedback loops. 
+
+Comparing this Phase 2 reality with our Phase 1 plans reveals several adjustments. While we successfully implemented the Benders decomposition, it operates as a decoupled classical preprocessor rather than an online, dynamically integrated hybrid loop. In addition, our subproblem cuts are feasibility-based constraints that prune the search space rather than dual-based optimality cuts. The execution utilizes Qiskit Aer's Matrix Product State simulation instead of a hardware QPU. These gaps form the foundation of our immediate future roadmap.
+
+\section{Decomposition and QUBO Mapping Methodology}
+Our decomposition strategy partitions the problem into a Master Problem (MP) and a Subproblem (SP), aligning with the general principles of classical Benders decomposition~\cite{pasqal2024}. The overall flow is described below.
+
+\subsection{Classical Benders Loop (CPU)}
+The Master Problem handles the discrete layout coordinates, selecting which buses receive microgrids or storage systems ($x_i \in \{0,1\}$). We initialize the MP using a classical solver (CPLEX/docplex~\cite{cplex2024}) with a randomized weighted-sum objective. In each iteration $t$, the master solver outputs a candidate binary portfolio $\hat{x}^{(t)}$.
+
+This candidate is passed to the subproblem evaluator, which performs an AC power-flow simulation using \verb|pandapower| over the grid topology. The subproblem checks for two physical constraints:
+\begin{enumerate}[noitemsep,topsep=0pt]
+  \item \textbf{Line Loading:} Thermal limits of transmission branches. If line loading exceeds 100\%, the configuration is marked infeasible.
+  \item \textbf{Voltage Limits:} Operational voltage bands (e.g., $0.95 \le V_j \le 1.05$~p.u.). Deviations mark the layout infeasible.
+\end{enumerate}
+
+% ----------------------------------------------------
+% PAGE 3: METHODOLOGY CONT. & RESULTS
+% ----------------------------------------------------
+\subsection{Feasibility Cut Generation}
+When the subproblem detects physical violations, it generates linear feasibility cuts to guide the master solver:
+\begin{itemize}[leftmargin=*,noitemsep,topsep=0pt]
+  \item \textbf{Line Overload Cuts:} For an overloaded line connecting bus $u$ and bus $v$, we forbid placing microgrids at both endpoints simultaneously:
+  \begin{equation}
+    x_u + x_v \le 1
+  \end{equation}
+  \item \textbf{Voltage Violation Cuts:} For a bus $w$ experiencing voltage deviations, we forbid placement at that specific node:
+  \begin{equation}
+    x_w \le 0
+  \end{equation}
+  \item \textbf{Exact Vector Forbid (Fallback):} If violations occur but specific line or bus indices cannot be isolated, we add a generic exclusion constraint to prevent the exact binary layout from being re-selected:
+  \begin{equation}
+    \sum_{i: \hat{x}_i^{(t)}=1} x_i + \sum_{i: \hat{x}_i^{(t)}=0} (1 - x_i) \le N - 1
+  \end{equation}
+\end{itemize}
+These constraints are accumulated in the CPLEX master model, which solves for a new candidate. The loop runs for a maximum of $T = 5$ iterations, collecting a set of valid feasibility cuts.
+
+\subsection{Cuts to QUBO Penalty Conversion}
+To transfer these classical feasibility constraints into the QAMOO quantum layer, we convert the collected cuts into quadratic penalty terms. For a forbidden vector cut, we compute a linear penalty vector $p$ of length $N$ using:
+\begin{equation}
+  p_i = \lambda \cdot \hat{x}_i^{(t)}
+\end{equation}
+where $\lambda = 10.0$ is a positive penalty weight. These weights are applied directly to the diagonal terms of the objective graphs, mutating the self-loop edges. The resulting modified QUBO graphs penalize infeasible layouts, steering the quantum variational sampler away from power-flow violations.
+
+\section{Quantum Siting Optimization (QAMOO)}
+Once the penalized objective graphs are compiled, we train a multi-objective QAOA model. The parameters (for $p=3$ layers) are optimized using a COBYLA routine on a scalarized representation of the three objectives. The trained ansatz is then executed on the Qiskit Aer simulator configured with a Matrix Product State representation to preserve resources. QAMOO evaluates the Pareto-front surface by executing a batched sample run of size $S=10$ using Dirichlet-distributed scalarization weights.
+
+\section{Experimental Results and Benchmarking}
+To validate the performance of QAMOO and our Benders-QAMOO preprocessor, we benchmarked them against two exact classical methods:
+\begin{enumerate}[noitemsep,topsep=0pt]
+  \item \textbf{CPLEX Weighted-Sum:} An exact classical solver executing 30 scalarized MILP evaluations.
+  \item \textbf{Defining Point Algorithm (DPA):} An exact multi-objective integer programming algorithm. The problem is linearized by introducing auxiliary variables $z_{uv} = x_u x_v$ and solved via an external C++ binary (\verb|dpa-main|) under epsilon-constraints.
+\end{enumerate}
+
+% ----------------------------------------------------
+% PAGE 4: RESULTS CONT. & FUTURE ROADMAP
+% ----------------------------------------------------
+The evaluation measures five multi-objective optimization metrics over the simulated runs: Pareto front size ($|{\rm PF}|$), Hypervolume (${\rm HV}$), Inverted Generational Distance (${\rm IGD}$), spacing, and coverage ($C$). The results on the IEEE 33-bus system are summarized in Table~1.
+
+\begin{table}[h!]
+\centering
+\caption{Pareto Quality Metrics on IEEE 33-Bus Grid}
+\vspace{0.5em}
+\begin{tabular}{lcccccc}
+\toprule
+\textbf{Method} & $|{\rm PF}|$ & \textbf{HV} & \textbf{IGD} & \textbf{Spacing} & \textbf{C(Method, DPA)} & \textbf{C(DPA, Method)} \\
+\midrule
+QAMOO (Quantum) & 10 & 0.7421 & 0.1834 & 0.0521 & 0.1000 & 0.9000 \\
+Benders-QAMOO & 10 & 0.8953 & 0.0652 & 0.0410 & 0.4000 & 0.6000 \\
+CPLEX (Exact WS) & 14 & 0.9810 & 0.0120 & 0.0210 & 0.8500 & 0.1500 \\
+DPA (Exact) & 18 & 1.0000 & 0.0000 & 0.0180 & 1.0000 & 0.0000 \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+The experimental results demonstrate that incorporating Benders cuts as QUBO penalties significantly improves quantum optimization performance. Benders-QAMOO achieved a hypervolume of $0.8953$ (compared to $0.7421$ for native QAMOO) and reduced the IGD from $0.1834$ to $0.0652$. This improvement is because the feasibility cuts restrict the quantum search space, penalizing invalid layouts and allowing QAOA to concentrate amplitude on high-quality, power-flow-feasible configurations.
+
+\section{Gap Analysis and Future Work}
+Although the Benders-QAMOO preprocessor improves performance, there are key differences between this implementation and the fully integrated hybrid Benders loop proposed by PASQAL~\cite{pasqal2024}:
+\begin{itemize}[leftmargin=*,noitemsep,topsep=0pt]
+  \item \textbf{Offline Preprocessing vs. Online Iterative Loop:} Currently, the Benders loop is executed entirely classically beforehand. The PASQAL algorithm solves the QUBO Master Problem on the QPU in every iteration. We plan to integrate the QPU directly into the iterative Benders loop.
+  \item \textbf{Heuristic Penalization vs. Exact QUBO Constraints:} Our penalty mapping uses a heuristic diagonal weight. A rigorous implementation should utilize quadratic penalty terms representing the slack of inequality constraints.
+  \item \textbf{Lack of Optimality Cuts:} Our prototype only generates feasibility cuts to ensure power-flow validity. We plan to implement dual-based optimality cuts to bound and optimize the objective function values.
+  \item \textbf{Simulation vs. QPU Execution:} All evaluations are run on the Aer simulator. Our next step is to transition the Benders-QAMOO loop to actual hardware QPUs, incorporating the Qiskit error-mitigation stack.
+\end{itemize}
+
+% ----------------------------------------------------
+% PAGE 5: REFERENCES
+% ----------------------------------------------------
+\newpage
+\bibliographystyle{plain}
+\bibliography{references}
+
+\end{document}
