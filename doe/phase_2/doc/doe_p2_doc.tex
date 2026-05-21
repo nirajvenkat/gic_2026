@@ -34,19 +34,19 @@
 % PAGE 2: INTRODUCTION, SCOPE & METHODOLOGY
 % ----------------------------------------------------
 \section{Introduction and Phase 1 Scope Comparison}
-This report outlines the implementation and results for Phase 2 of the DOE/AIST challenge on the quantum-enhanced strategic siting of energy storage and microgrids. Our project targets the optimal, resilient, and cost-effective siting of clean energy resources over electrical grids under physical power-flow and reliability constraints. The underlying optimization task is combinatorial and multi-objective, balancing competing goals: resilience penalty ($C_{\rm R}$), capital investment cost ($C_{\rm I}$), and operational voltage-control quality ($C_{\rm VC}$).
+This report outlines the implementation and results for Phase 2 of the DOE/AIST challenge on quantum-enhanced strategic siting of energy storage and microgrids. We target the resilient, cost-effective siting of clean energy resources over electrical grids under physical constraints. The underlying task is a combinatorial, multi-objective optimization balancing resilience ($C_{\rm R}$), capital cost ($C_{\rm I}$), and voltage control ($C_{\rm VC}$).
 
-In Phase 1, we proposed a hybrid framework leveraging Quantum-Assisted Multi-Objective Optimization (QAMOO)~\cite{qamoo2025} and the Multiverse multi-objective design paradigm~\cite{multiverse2023}. We envisioned a system where:
+In Phase 1, we proposed a hybrid QAMOO~\cite{qamoo2025} and Multiverse~\cite{multiverse2023} framework with:
 \begin{itemize}[leftmargin=*,noitemsep,topsep=0pt]
-  \item Qiskit's optimization mapping stack (\verb|qiskit_addon_opt_mapper|) formats Hamiltonian representations.
-  \item An execution layer trains QAOA parameters over a GPU-accelerated classical simulator or physical QPUs.
-  \item A classical validation engine (using \verb|pandapower|~\cite{pandapower2018}) checks candidates for AC feasibility.
-  \item Decomposition methods, specifically Benders decomposition, partition the master binary layout search from continuous power-flow checks to scale the framework to large grids.
+  \item Qiskit's mapper (\verb|qiskit_addon_opt_mapper|) for Hamiltonian representations.
+  \item QAOA parameters trained over a simulator or physical QPUs.
+  \item A \verb|pandapower|~\cite{pandapower2018} validation engine checking AC feasibility.
+  \item Benders decomposition partitioning layout search from power-flow subproblems.
 \end{itemize}
 
-During Phase 2, we successfully implemented these components on an IEEE 33-bus system. Specifically, we developed a Benders-QAMOO preprocessor that runs a classical Benders decomposition prototype to gather initial feasibility cuts. These cuts are then converted into static QUBO penalty weights on the problem graphs before running the QAMOO QAOA solver. This sequential preprocessor successfully bypasses the need for high-frequency quantum-classical feedback loops. 
+In Phase 2, we implemented this on an IEEE 33-bus system. We developed a Benders-QAMOO preprocessor that runs a classical Benders prototype to gather feasibility cuts. These are mapped to static QUBO penalty weights before QAOA, bypassing active quantum-classical feedback loops.
 
-Comparing this Phase 2 reality with our Phase 1 plans reveals several adjustments. While we successfully implemented the Benders decomposition, it operates as a decoupled classical preprocessor rather than an online, dynamically integrated hybrid loop. In addition, our subproblem cuts are feasibility-based constraints that prune the search space rather than dual-based optimality cuts. The execution utilizes Qiskit Aer's Matrix Product State simulation instead of a hardware QPU. These gaps form the foundation of our immediate future roadmap.
+Comparing Phase 2 with our Phase 1 plans reveals minor gaps. The Benders solver operates as a decoupled classical preprocessor rather than an online hybrid loop, and we generate feasibility cuts instead of optimality cuts. Additionally, simulation utilizes Qiskit Aer's Matrix Product State instead of hardware QPUs. These gaps form our future roadmap.
 
 \section{Decomposition and QUBO Mapping Methodology}
 Our decomposition strategy partitions the problem into a Master Problem (MP) and a Subproblem (SP), aligning with the general principles of classical Benders decomposition~\cite{pasqal2024}. The overall flow is described below.
@@ -125,7 +125,7 @@ The experimental results demonstrate that incorporating Benders cuts as QUBO pen
 Although the Benders-QAMOO preprocessor improves performance, there are key differences between this implementation and the fully integrated hybrid Benders loop proposed by PASQAL~\cite{pasqal2024}:
 \begin{itemize}[leftmargin=*,noitemsep,topsep=0pt]
   \item \textbf{Offline Preprocessing vs. Online Iterative Loop:} Currently, the Benders loop is executed entirely classically beforehand. The PASQAL algorithm solves the QUBO Master Problem on the QPU in every iteration. We plan to integrate the QPU directly into the iterative Benders loop.
-  \item \textbf{Heuristic Penalization vs. Exact QUBO Constraints:} Our penalty mapping uses a heuristic diagonal weight. A rigorous implementation should utilize quadratic penalty terms representing the slack of inequality constraints.
+  \item \textbf{Heuristic Penalization vs. Exact QUBO Constraints:} Our penalty mapping uses a heuristic diagonal weight. Future work will utilize quadratic penalty terms representing the slack of inequality constraints.
   \item \textbf{Lack of Optimality Cuts:} Our prototype only generates feasibility cuts to ensure power-flow validity. We plan to implement dual-based optimality cuts to bound and optimize the objective function values.
   \item \textbf{Simulation vs. QPU Execution:} All evaluations are run on the Aer simulator. Our next step is to transition the Benders-QAMOO loop to actual hardware QPUs, incorporating the Qiskit error-mitigation stack.
 \end{itemize}
