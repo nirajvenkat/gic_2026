@@ -230,7 +230,7 @@ nx_graph = nx.Graph(mg)
 # Relabel nodes to 0..N-1
 mapping = {node: i for i, node in enumerate(nx_graph.nodes())}
 nx_graph = nx.relabel_nodes(nx_graph, mapping)
-edges = list(nx_graph.edges())
+edges = sorted([tuple(sorted(e)) for e in nx_graph.edges()])
 
 # Generate edge weights representing our three QUBO objectives:
 # Obj 1: Resilience/Reliability Penalty
@@ -519,7 +519,7 @@ def solve_classical_mo_dpa(num_qubits, problem_dir, num_objectives):
     if proc.returncode != 0:
         raise RuntimeError(f"DPA failed (code {proc.returncode}): {proc.stderr[-500:]}")
     
-    # Parse the pareto points from the output file
+    # Parse the Pareto points from the output file
     sol_file = out_file + ".sol"
     if not os.path.exists(sol_file):
         raise FileNotFoundError(f"DPA solution file not found: {sol_file}")

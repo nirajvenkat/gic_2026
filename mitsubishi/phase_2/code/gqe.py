@@ -24,9 +24,25 @@
 #     version: 3.13.9
 # ---
 
+# %% [markdown]
+# # Generative Quantum Eigensolver (GQE) & q-sc-EOM for Core-Level Spectroscopy
+# **Team Name:** Entangled Trio
+#
+# This notebook demonstrates the Generative Quantum Eigensolver (GQE) combined with the Quantum Self-Consistent Equation-of-Motion (q-sc-EOM) and One-Center Approximation (OCA) for simulating core-level Auger electron spectra for $\rm H_2O$.
+#
+# Inspired by the workflow in [Keithley et al.](https://arxiv.org/abs/2603.12859v1) shown below:
+
+# %% [markdown]
+# ![mi](../../img/workflow_fig.png)
+
 # %%
 # %matplotlib inline
 # %config InlineBackend.figure_format = 'retina'
+
+# %% [markdown]
+# ## Molecular Data Generation
+#
+# We define a helper function to generate molecular data (Hamiltonian, operator pool, number of qubits/electrons, Hartree-Fock state) either using PennyLane's internal `qchem` dataset downloader or by fetching molecular geometry from PubChem and building the Hamiltonian.
 
 # %%
 import numpy as np
@@ -41,11 +57,27 @@ def generate_molecule_data(molecule_name="H2", source="qchem", local_dataset_pat
     molecule_data = dict()
     
     if source == "qchem":
+        import h5py
+        from pathlib import Path
+
         try:
-            # Try to load locally first or normally if online
+            # Try loading locally first
             datasets = qml.data.load("qchem", molname=molecule_name, folder_path=local_dataset_path)
         except Exception:
-            datasets = qml.data.load("qchem", molname=molecule_name)
+            # Clean up corrupted/truncated HDF5 files in the local path and current directory
+            for path in [Path(local_dataset_path), Path(".")]:
+                if path.exists():
+                    for p in path.rglob("*.h5"):
+                        try:
+                            with h5py.File(p, "r") as f:
+                                _ = list(f.keys())
+                        except Exception as e:
+                            print(f"Removing corrupted dataset file {p} due to: {e}")
+                            p.unlink(missing_ok=True)
+            try:
+                datasets = qml.data.load("qchem", molname=molecule_name, folder_path=local_dataset_path)
+            except Exception:
+                datasets = qml.data.load("qchem", molname=molecule_name)
             
         dataset = datasets[0]
         molecule = dataset.molecule
@@ -101,6 +133,11 @@ def generate_molecule_data(molecule_name="H2", source="qchem", local_dataset_pat
     return molecule_data
 
 
+# %% [markdown]
+# ## Loading and Configuring Molecular Parameters
+#
+# We load the dataset for the target molecule (e.g., $H_2O$) via both the offline `qchem` database and `pubchem` to extract the coordinates, Hamiltonian terms, Hartree-Fock reference state, and full operator pool of single and double excitations.
+
 # %%
 target_molecule = "H2O"
 
@@ -138,9 +175,23 @@ hamiltonian = qchem_data["hamiltonian"]
 grd_E = qchem_data["expected_ground_state_E"]
 op_pool_size = len(op_pool)
 
+# %% [markdown]
+# ## Environment Configuration
+#
+# Define configuration flags to determine whether to use the GPU-accelerated **CUDA-Q** simulator back-end and whether to use the **Diffusion Transformer (DiT)** architecture instead of standard GPT.
+
 # %%
 USE_CUDAQ = False
-USE_DIT = False
+USE_DIT = True
+
+# %% [markdown]
+# ## Subsequence Energy Evaluation
+#
+# We define backend-specific functions to execute subsequence energy evaluations. For GPU acceleration, CUDA-Q observes the Hamiltonian directly via custom memories and operations. For standard runs, we use PennyLane's `lightning.qubit` simulator.
+#
+# ### CUDA-Q Execution Kernel (Optional)
+#
+# If `USE_CUDAQ` is enabled, we map the PennyLane Hamiltonians to CUDA-Q spin operators and construct specialized kernels to evaluate subsequence expectation values.
 
 # %%
 import pennylane as qml
@@ -207,6 +258,11 @@ if USE_CUDAQ:
     # Verify with a tiny sequence
     print(get_subsequence_energies_cudaq([[op_pool[0], op_pool[1]]]))
 
+# %% [markdown]
+# ### PennyLane Simulator Execution
+#
+# We define the standard PennyLane QNode and subsequence collation function on `lightning.qubit` using snapshots to compute intermediate energies efficiently in a single simulator run.
+
 # %%
 dev = qml.device("lightning.qubit", wires=num_qubits)
 
@@ -241,12 +297,17 @@ if not USE_CUDAQ:
     # Verify with a tiny sequence
     print(get_subsequence_energies([[op_pool[0], op_pool[1]]]))
 
+# %% [markdown]
+# ## Dataset Generation
+#
+# Generate the training set consisting of random operator index sequences, their corresponding token sequences (pre-padded with starting/special tokens), and evaluate their subsequence energies.
+
 # %%
 # Generate sequence of indices of operators in vocab
 import os
-train_size = 1024  # Reduced from 1024 -> 512 to speed up dataset generation for larger H2O Hilbert space!
+train_size = 1024
 seq_len = 4
-trial_name = "trial2_h2o"
+trial_name = "trial_h2o"
 
 # Create the directory structure for saving models and results
 save_dir = f"./seq_len={seq_len}/{trial_name}"
@@ -265,6 +326,13 @@ train_token_seq = np.concatenate([
 
 # Calculate the energies for each subsequence in the training set
 train_sub_seq_en = get_subsequence_energies(train_op_seq)
+
+# %% [markdown]
+# ## GPTQE and DiTQE Model Architectures
+#
+# We define two generative models for GQE:
+# 1. **GPTQE**: A causal language model (based on nanoGPT) that learns to auto-regressively generate circuit excitation sequences conditioned on minimizing energy.
+# 2. **DITQE**: A Diffusion-Transformer-style architecture that modulates token embeddings using the final target energies as continuous conditions, based on [*6.S184/6.S975: Generative AI with Stochastic Differential Equations*](https://diffusion.csail.mit.edu).
 
 # %%
 # # !curl -O https://raw.githubusercontent.com/karpathy/nanoGPT/master/model.py
@@ -499,6 +567,11 @@ class DITQE(GPT):
         return idx, total_logits
 
 
+# %% [markdown]
+# ## Model Training and Optimization
+#
+# We configure the model hyperparameters, initialize the optimizer, and train the Generative Quantum Eigensolver (GQE) network. Every 500 epochs, we sample candidate sequences and evaluate their energies to monitor convergence towards the physical ground state.
+
 # %%
 # Select best available device: prefer MPS, then CUDA, then CPU
 import torch
@@ -605,6 +678,11 @@ pd.DataFrame(losses).to_csv(f"{save_dir}/losses.csv")
 pd.DataFrame(true_Es_t, columns=eval_iterations).to_csv(f"{save_dir}/true_Es_t.csv")
 pd.DataFrame(pred_Es_t, columns=eval_iterations).to_csv(f"{save_dir}/pred_Es_t.csv")
 
+# %% [markdown]
+# ## Training Performance Visualization
+#
+# We visualize the training loss progress over the epochs to check optimization stability.
+
 # %%
 import holoviews as hv
 import hvplot.pandas
@@ -617,6 +695,11 @@ loss_fig = losses.hvplot(
     title="Training loss progress", ylabel="loss", xlabel="Training epochs", logy=True
 ).opts(fig_size=600, fontscale=2, aspect=1.2)
 loss_fig
+
+# %% [markdown]
+# ## GQE Energy Predictions vs. True Energies
+#
+# We plot the mean and range of the GQE-predicted energy sequences against their true quantum simulator energy values, demonstrating how the generator converges towards the ground-state energy.
 
 # %%
 df_true = pd.read_csv(f"./seq_len={seq_len}/{trial_name}/true_Es_t.csv").iloc[:, 1:]
@@ -643,6 +726,11 @@ fig = (
 fig = fig * hv.Curve([[0, grd_E], [10000, grd_E]], label="Ground State Energy").opts(color="k", alpha=0.4, linestyle="dashed")
 fig = fig.opts(ylabel="Sequence Energies", title="GQE Evaluations", fig_size=600, fontscale=2)
 fig
+
+# %% [markdown]
+# ## Evaluation Summary
+#
+# We compare the statistics (average, minimum, and maximum energy) of random sequences against the outputs of the latest trained model and the best-performing model checkpoint.
 
 # %%
 # Latest model
@@ -681,8 +769,14 @@ df_compare_Es = pd.DataFrame({
 })
 df_compare_Es
 
+# %% [markdown]
+# # Step 2: Quantum Self-Consistent Equation-of-Motion (q-sc-EOM)
+#
+# We identify the best ansatz sequence generated by GQE and use it as a reference state. We then execute the q-sc-EOM algorithm to calculate:
+# 1. Core-ionized energy levels (IP space, $N-1$ electrons).
+# 2. Doubly ionized energy levels (DIP space, $N-2$ electrons).
+
 # %%
-# Step 2: q-sc-EOM for core-ionized and doubly ionized energies & transition RDMs
 from qsceom import qscEOM
 
 # 1. Identify the best sequence of operations from the trained Generative Quantum Eigensolver (GQE)
@@ -714,6 +808,15 @@ charge = 0 # Default calculation assumes a neutral molecule (e.g. H2)
 print(f"Preparing q-sc-EOM for {target_molecule}...")
 print(f"Number of excitations in reference ansatz from GQE: {len(params)}")
 
+# Resolve absolute path for pyscf datasets directory
+import os
+try:
+    current_file_dir = os.path.dirname(os.path.abspath(__file__))
+except NameError:
+    current_file_dir = os.getcwd()
+datasets_pyscf_dir = os.path.abspath(os.path.join(current_file_dir, "./datasets/pyscf"))
+os.makedirs(datasets_pyscf_dir, exist_ok=True)
+
 # 4. Run qscEOM to compute the energies (IP and DIP spaces)
 # Run 1: IP space (Core-hole state, N-1 electrons)
 qsceom_ip_res = qscEOM(
@@ -729,7 +832,8 @@ qsceom_ip_res = qscEOM(
     basis="sto-3g",
     method="openfermion", # Needed to support open shell
     shots=0, 
-    return_details=True
+    return_details=True,
+    outpath=datasets_pyscf_dir
 )
 eigs_ip, details_ip = qsceom_ip_res
 print("\nq-sc-EOM IP (N-1) state energies:")
@@ -749,14 +853,19 @@ qsceom_dip_res = qscEOM(
     basis="sto-3g",
     method="openfermion", # Consistency
     shots=0, 
-    return_details=True
+    return_details=True,
+    outpath=datasets_pyscf_dir
 )
 eigs_dip, details_dip = qsceom_dip_res
 print("\nq-sc-EOM DIP (N-2) state energies:")
 print(eigs_dip)
 
+# %% [markdown]
+# # Step 2.5: Minimal Basis Projection of Atomic Integrals
+#
+# The One-Center Approximation (OCA) requires transition matrix elements to be restricted to the emitter atom's center. We reconstruct the system in PySCF and project molecular orbital coefficients onto the minimal basis set (MBS) of the emitter atom (Oxygen, index 0).
+
 # %%
-# Step 2.5: Generate Atomic Integrals via PySCF (Minimal Basis Projection)
 # Paper Eq. 18-19: OCA uses atomic basis integrals, not molecular orbital integrals
 # ⟨χ_Elm^A χ_c^A | χ_ν^A χ_ρ^A⟩ where {χ^A} are minimal basis set (MBS) atomic orbitals on emitter atom
 from pyscf import gto, scf, ao2mo
@@ -824,14 +933,17 @@ print(f"\n⚠️  NOTE: This uses PySCF MO integrals as proxy.")
 print(f"For rigorous OCA, should use OpenMolcas atomic integral tables (Sec. II.3 of paper).")
 print(f"Constructed V_pq tensor: shape {V_pq.shape}")
 
+# %% [markdown]
+# # Step 3: One-Center Approximation (OCA) & Auger Transition Intensities
+#
+# We calculate the transition reduced density matrix (RDM) $\gamma_{pq}$ between the core-ionized state and double-ionization states, and contract it with the projected atomic integrals to compute Auger transition intensities under Fermi's Golden Rule.
+
 # %%
 import torch
 import numpy as np
 import pandas as pd
 import holoviews as hv
 import hvplot.pandas
-
-# --- Step 3: One-Center Approximation (OCA for Auger Spectrum) ---
 
 HARTREE_TO_EV = 27.211386245988
 device = torch.device("mps" if torch.backends.mps.is_available() else "cpu")
@@ -975,8 +1087,12 @@ Gamma_k = 2 * torch.pi * torch.sum(torch.abs(amplitudes) ** 2, dim=(1, 2))
 Gamma_k_vals = Gamma_k.cpu().numpy()
 print(f"\nComputed Auger Transition Intensities (Gamma_k) for {num_states} states.")
 
+# %% [markdown]
+# # Step 4: Auger Spectrum Broadening and Visualization
+#
+# We compute the Auger electron kinetic energies ($E_{\text{kin}} = E_{\text{IP}} - E_{\text{DIP}}$) and apply Lorentzian broadening with a typical experimental line-width parameter ($\Gamma = 1.5\text{ eV}$) to simulate the final Auger electron spectrum.
+
 # %%
-# --- AUGER SPECTRUM BROADENING (UNSHIFTED PRIMARY RESULT) ---
 
 # qscEOM eigenvalues are used to compute Auger electron kinetic energy
 # Paper Eq. 14: E_kin^Auger = E_IP(I) - E_DIP(K)
@@ -1026,7 +1142,7 @@ df_spectrum = pd.DataFrame(
 spectrum_fig = df_spectrum.hvplot.line(
     x="Kinetic Energy (eV)",
     y="Intensity (normalized)",
-    title="Simulated Auger Spectrum",
+    title=f"Simulated Auger Spectrum with {USE_DIT and 'DiT' or 'GPT'} Reference State",
     ylabel="Normalized Intensity",
     color="darkred",
     width=900,
