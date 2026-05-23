@@ -35,9 +35,43 @@
 # %% [markdown]
 # ![mi](../../img/workflow_fig.png)
 
+# %% [markdown]
+# ## Setup
+
 # %%
 # %matplotlib inline
 # %config InlineBackend.figure_format = 'retina'
+
+import os
+import pickle
+
+# Resolve absolute paths
+def get_current_file_dir():
+    try:
+        return os.path.dirname(os.path.abspath(__file__))
+    except NameError:
+        if os.path.exists("mitsubishi/phase_2/code"):
+            return os.path.abspath("mitsubishi/phase_2/code")
+        return os.getcwd()
+
+current_file_dir = get_current_file_dir()
+
+# Parameters
+USE_CUDAQ = False
+USE_DIT = False
+USE_AVAS = True
+
+cache_dir = os.path.join(current_file_dir, "datasets", "qsceom")
+cache_suffix = "_avas" if USE_AVAS else ""
+cache_path = os.path.join(cache_dir, f"qsceom_cache{cache_suffix}.pkl")
+has_cache = os.path.exists(cache_path)
+
+seq_len = 4
+trial_name = "trial_h2o"
+if USE_AVAS:
+    trial_name += "_avas"
+save_dir = os.path.abspath(os.path.join(current_file_dir, f"./seq_len={seq_len}/{trial_name}"))
+
 
 # %% [markdown]
 # ## Molecular Data Generation
@@ -49,7 +83,7 @@ import numpy as np
 import pennylane as qml
 import pubchempy as pcp
 
-def generate_molecule_data(molecule_name="H2", source="qchem", local_dataset_path="./datasets"):
+def generate_molecule_data(molecule_name="H2", source="qchem", local_dataset_path="./datasets", use_avas=False):
     # Get the time set T
     op_times = np.sort(np.array([-2**k for k in range(1, 5)] + [2**k for k in range(1, 5)]) / 160)
 
@@ -83,10 +117,32 @@ def generate_molecule_data(molecule_name="H2", source="qchem", local_dataset_pat
         molecule = dataset.molecule
         symbols = molecule.symbols
         coords = molecule.coordinates
-        num_electrons, num_qubits = molecule.n_electrons, 2 * molecule.n_orbitals
-        hf_state = dataset.hf_state
-        hamiltonian = dataset.hamiltonian
-        expected_ground_state_E = dataset.fci_energy
+        
+        if use_avas and molecule_name == "H2O":
+            active_electrons = 8
+            active_orbitals = 6
+            num_electrons = active_electrons
+            num_qubits = 2 * active_orbitals
+            
+            # Rebuild Hamiltonian with active space
+            hamiltonian, num_qubits = qml.qchem.molecular_hamiltonian(
+                symbols, 
+                coords, 
+                active_electrons=active_electrons, 
+                active_orbitals=active_orbitals
+            )
+            hf_state = qml.qchem.hf_state(active_electrons, num_qubits)
+            
+            # Compute active space expected ground state energy (FCI energy)
+            import scipy.sparse.linalg
+            H_sparse = hamiltonian.sparse_matrix()
+            eigenvalues = scipy.sparse.linalg.eigsh(H_sparse, k=1, which='SA', return_eigenvectors=False)
+            expected_ground_state_E = float(eigenvalues[0])
+        else:
+            num_electrons, num_qubits = molecule.n_electrons, 2 * molecule.n_orbitals
+            hf_state = dataset.hf_state
+            hamiltonian = dataset.hamiltonian
+            expected_ground_state_E = dataset.fci_energy
         
     elif source == "pubchem":
         # Fetch from PubChem
@@ -102,15 +158,36 @@ def generate_molecule_data(molecule_name="H2", source="qchem", local_dataset_pat
                             getattr(atom, 'y', 0.0) or 0.0, 
                             getattr(atom, 'z', 0.0) or 0.0] for atom in c.atoms])
         
-        # Build Hamiltonian and molecule using PennyLane
-        hamiltonian, num_qubits = qml.qchem.molecular_hamiltonian(symbols, coords)
-        
-        # Simple estimation of electrons (assuming neutral molecule)
-        electron_map = {'H': 1, 'C': 6, 'N': 7, 'O': 8, 'F': 9, 'I': 53}
-        num_electrons = sum([electron_map.get(s, 0) for s in symbols]) 
-        
-        hf_state = qml.qchem.hf_state(num_electrons, num_qubits)
-        expected_ground_state_E = None # FCI energy isn't directly pulled from PubChem
+        if use_avas and molecule_name == "H2O":
+            active_electrons = 8
+            active_orbitals = 6
+            num_electrons = active_electrons
+            num_qubits = 2 * active_orbitals
+            
+            # Build Hamiltonian with active space
+            hamiltonian, num_qubits = qml.qchem.molecular_hamiltonian(
+                symbols, 
+                coords, 
+                active_electrons=active_electrons, 
+                active_orbitals=active_orbitals
+            )
+            hf_state = qml.qchem.hf_state(active_electrons, num_qubits)
+            
+            # Compute active space expected ground state energy (FCI energy)
+            import scipy.sparse.linalg
+            H_sparse = hamiltonian.sparse_matrix()
+            eigenvalues = scipy.sparse.linalg.eigsh(H_sparse, k=1, which='SA', return_eigenvectors=False)
+            expected_ground_state_E = float(eigenvalues[0])
+        else:
+            # Build Hamiltonian and molecule using PennyLane
+            hamiltonian, num_qubits = qml.qchem.molecular_hamiltonian(symbols, coords)
+            
+            # Simple estimation of electrons (assuming neutral molecule)
+            electron_map = {'H': 1, 'C': 6, 'N': 7, 'O': 8, 'F': 9, 'I': 53}
+            num_electrons = sum([electron_map.get(s, 0) for s in symbols]) 
+            
+            hf_state = qml.qchem.hf_state(num_electrons, num_qubits)
+            expected_ground_state_E = None # FCI energy isn't directly pulled from PubChem
 
     singles, doubles = qml.qchem.excitations(num_electrons, num_qubits)
     double_excs = [qml.DoubleExcitation(time, wires=double) for double in doubles for time in op_times]
@@ -146,7 +223,7 @@ def get_hamiltonian_terms_len(h):
     return len(getattr(h, "ops", getattr(h, "operands", [])))
 
 # 1. Load via qchem
-qchem_molecule_data = generate_molecule_data(target_molecule, source="qchem")
+qchem_molecule_data = generate_molecule_data(target_molecule, source="qchem", use_avas=USE_AVAS)
 qchem_data = qchem_molecule_data[target_molecule]
 
 print(f"--- {target_molecule} (qchem) ---")
@@ -157,7 +234,7 @@ print(f"FCI Energy: {qchem_data['expected_ground_state_E']}")
 print(f"Hamiltonian terms: {get_hamiltonian_terms_len(qchem_data['hamiltonian'])}")
 
 # 2. Load via pubchem
-pubchem_molecule_data = generate_molecule_data(target_molecule, source="pubchem")
+pubchem_molecule_data = generate_molecule_data(target_molecule, source="pubchem", use_avas=USE_AVAS)
 pubchem_data = pubchem_molecule_data[target_molecule]
 
 print(f"\n--- {target_molecule} (pubchem) ---")
@@ -181,8 +258,6 @@ op_pool_size = len(op_pool)
 # Define configuration flags to determine whether to use the GPU-accelerated **CUDA-Q** simulator back-end and whether to use the **Diffusion Transformer (DiT)** architecture instead of standard GPT.
 
 # %%
-USE_CUDAQ = False
-USE_DIT = True
 
 # %% [markdown]
 # ## Subsequence Energy Evaluation
@@ -303,29 +378,42 @@ if not USE_CUDAQ:
 # Generate the training set consisting of random operator index sequences, their corresponding token sequences (pre-padded with starting/special tokens), and evaluate their subsequence energies.
 
 # %%
-# Generate sequence of indices of operators in vocab
 import os
-train_size = 1024
+import pickle
+
+# Resolve absolute paths
+current_file_dir = get_current_file_dir()
+
+cache_dir = os.path.join(current_file_dir, "datasets", "qsceom")
+use_avas_val = globals().get("USE_AVAS", False)
+cache_suffix = "_avas" if use_avas_val else ""
+cache_path = os.path.join(cache_dir, f"qsceom_cache{cache_suffix}.pkl")
+has_cache = os.path.exists(cache_path)
+
 seq_len = 4
 trial_name = "trial_h2o"
+if use_avas_val:
+    trial_name += "_avas"
+save_dir = os.path.abspath(os.path.join(current_file_dir, f"./seq_len={seq_len}/{trial_name}"))
 
-# Create the directory structure for saving models and results
-save_dir = f"./seq_len={seq_len}/{trial_name}"
-os.makedirs(save_dir, exist_ok=True)
+if not has_cache:
+    # Generate sequence of indices of operators in vocab
+    train_size = 1024
+    os.makedirs(save_dir, exist_ok=True)
 
-train_op_pool_inds = np.random.randint(op_pool_size, size=(train_size, seq_len))
+    train_op_pool_inds = np.random.randint(op_pool_size, size=(train_size, seq_len))
 
-# Corresponding sequence of operators
-train_op_seq = op_pool[train_op_pool_inds]
+    # Corresponding sequence of operators
+    train_op_seq = op_pool[train_op_pool_inds]
 
-# Corresponding tokens with special starting tokens
-train_token_seq = np.concatenate([
-    np.zeros(shape=(train_size, 1), dtype=int), # starting token is 0
-    train_op_pool_inds + 1 # shift operator inds by one
-], axis=1)
+    # Corresponding tokens with special starting tokens
+    train_token_seq = np.concatenate([
+        np.zeros(shape=(train_size, 1), dtype=int), # starting token is 0
+        train_op_pool_inds + 1 # shift operator inds by one
+    ], axis=1)
 
-# Calculate the energies for each subsequence in the training set
-train_sub_seq_en = get_subsequence_energies(train_op_seq)
+    # Calculate the energies for each subsequence in the training set
+    train_sub_seq_en = get_subsequence_energies(train_op_seq)
 
 # %% [markdown]
 # ## GPTQE and DiTQE Model Architectures
@@ -588,95 +676,106 @@ else:
 device_type_opt = "cuda" if device == "cuda" else "cpu"
 print(f"Using device: {device} (optimizer device type: {device_type_opt})")
 
-# Move training tensors and model to the selected device
-tokens = torch.from_numpy(train_token_seq).to(device)
-energies = torch.from_numpy(train_sub_seq_en).float().to(device)
+if not has_cache:
+    import pandas as pd
+    from tqdm.auto import tqdm
 
-config = GPTConfig(
-    vocab_size=op_pool_size + 1,
-    block_size=seq_len,
-    dropout=0.2,
-    bias=False,
-)
+    # Move training tensors and model to the selected device
+    tokens = torch.from_numpy(train_token_seq).to(device)
+    energies = torch.from_numpy(train_sub_seq_en).float().to(device)
 
-if USE_DIT:
-    gpt = DITQE(config).to(device)
-else:
-    gpt = GPTQE(config).to(device)
+    config = GPTConfig(
+        vocab_size=op_pool_size + 1,
+        block_size=seq_len,
+        dropout=0.2,
+        bias=False,
+    )
 
-opt = gpt.configure_optimizers(
-    weight_decay=0.01, learning_rate=5e-4, betas=(0.9, 0.999), device_type=device_type_opt
-)
+    if USE_DIT:
+        gpt = DITQE(config).to(device)
+    else:
+        gpt = GPTQE(config).to(device)
 
-n_batches = 8
-train_inds = np.arange(train_size)
+    opt = gpt.configure_optimizers(
+        weight_decay=0.01, learning_rate=5e-4, betas=(0.9, 0.999), device_type=device_type_opt
+    )
 
-losses = []
-pred_Es_t = []
-true_Es_t = []
-eval_iterations = []
-current_mae = 10000
-gpt.train()
-for i in tqdm(range(10000), desc="Training"):
-    # Shuffle batches of the training set
-    np.random.shuffle(train_inds)
-    token_batches = torch.tensor_split(tokens[train_inds], n_batches)
-    energy_batches = torch.tensor_split(energies[train_inds], n_batches)
-    
-    # SGD on random minibatches
-    loss_record = 0
-    for token_batch, energy_batch in zip(token_batches, energy_batches):
-        opt.zero_grad()
-        loss = gpt.calculate_loss(token_batch, energy_batch, grd_E)
-        loss.backward()
-        opt.step()
-        loss_record += loss.item() / n_batches
-    losses.append(loss_record)
+    n_batches = 8
+    train_inds = np.arange(train_size)
 
-    if (i+1) % 500 == 0:
-        # For GPT evaluation
-        gpt.eval()
-        gen_kwargs = {
-            "n_sequences": 100, 
-            "max_new_tokens": seq_len, 
-            "temperature": 0.001, 
-            "device": device
-        }
-        if USE_DIT:
-            gen_kwargs["energies"] = grd_E
-            
-        gen_token_seq, pred_Es = gpt.generate(**gen_kwargs)
-        pred_Es = pred_Es.cpu().numpy()
+    losses = []
+    pred_Es_t = []
+    true_Es_t = []
+    eval_iterations = []
+    current_mae = 10000
 
-        gen_inds = (gen_token_seq[:, 1:] - 1).cpu().numpy()
-        gen_op_seq = op_pool[gen_inds]
-        true_Es = get_subsequence_energies(gen_op_seq)[:, -1].reshape(-1, 1)
-
-        mae = np.mean(np.abs(pred_Es - true_Es))
-        ave_E = np.mean(true_Es)
-        
-        eval_iterations.append(i + 1)
-        
-        pred_Es_t.append(pred_Es)
-        true_Es_t.append(true_Es)
-        
-        # tqdm.write is better than print when using tqdm in notebooks/terminal to avoid visual bugs
-        tqdm.write(f"Iteration: {i+1}, Loss: {losses[-1]:.8f}, MAE: {mae:.4f}, Ave E: {ave_E:.4f}")
-        
-        if mae < current_mae:
-            current_mae = mae
-            torch.save(gpt, f"{save_dir}/gqe.pt")
-            tqdm.write("Saved model!")
-            
+    # Check if a pre-trained model is already available
+    model_path = os.path.join(save_dir, "gqe.pt")
+    if os.path.exists(model_path):
+        print(f"Pre-trained GQE model found at {model_path}. Loading model and skipping training loop...")
+        gpt = torch.load(model_path, map_location=device, weights_only=False)
+    else:
         gpt.train()
-        
-pred_Es_t = np.concatenate(pred_Es_t, axis=1)
-true_Es_t = np.concatenate(true_Es_t, axis=1)
+        for i in tqdm(range(10000), desc="Training"):
+            # Shuffle batches of the training set
+            np.random.shuffle(train_inds)
+            token_batches = torch.tensor_split(tokens[train_inds], n_batches)
+            energy_batches = torch.tensor_split(energies[train_inds], n_batches)
+            
+            # SGD on random minibatches
+            loss_record = 0
+            for token_batch, energy_batch in zip(token_batches, energy_batches):
+                opt.zero_grad()
+                loss = gpt.calculate_loss(token_batch, energy_batch, grd_E)
+                loss.backward()
+                opt.step()
+                loss_record += loss.item() / n_batches
+            losses.append(loss_record)
 
-# Persist training outputs for later analysis cells
-pd.DataFrame(losses).to_csv(f"{save_dir}/losses.csv")
-pd.DataFrame(true_Es_t, columns=eval_iterations).to_csv(f"{save_dir}/true_Es_t.csv")
-pd.DataFrame(pred_Es_t, columns=eval_iterations).to_csv(f"{save_dir}/pred_Es_t.csv")
+            if (i+1) % 500 == 0:
+                # For GPT evaluation
+                gpt.eval()
+                gen_kwargs = {
+                    "n_sequences": 100, 
+                    "max_new_tokens": seq_len, 
+                    "temperature": 0.001, 
+                    "device": device
+                }
+                if USE_DIT:
+                    gen_kwargs["energies"] = grd_E
+                    
+                gen_token_seq, pred_Es = gpt.generate(**gen_kwargs)
+                pred_Es = pred_Es.cpu().numpy()
+
+                gen_inds = (gen_token_seq[:, 1:] - 1).cpu().numpy()
+                gen_op_seq = op_pool[gen_inds]
+                true_Es = get_subsequence_energies(gen_op_seq)[:, -1].reshape(-1, 1)
+
+                mae = np.mean(np.abs(pred_Es - true_Es))
+                ave_E = np.mean(true_Es)
+                
+                eval_iterations.append(i + 1)
+                
+                pred_Es_t.append(pred_Es)
+                true_Es_t.append(true_Es)
+                
+                # tqdm.write is better than print when using tqdm in notebooks/terminal to avoid visual bugs
+                tqdm.write(f"Iteration: {i+1}, Loss: {losses[-1]:.8f}, MAE: {mae:.4f}, Ave E: {ave_E:.4f}")
+                
+                if mae < current_mae:
+                    current_mae = mae
+                    torch.save(gpt, f"{save_dir}/gqe.pt")
+                    tqdm.write("Saved model!")
+                    
+                gpt.train()
+                
+        pred_Es_t = np.concatenate(pred_Es_t, axis=1)
+        true_Es_t = np.concatenate(true_Es_t, axis=1)
+
+        # Persist training outputs for later analysis cells
+        pd.DataFrame(losses).to_csv(f"{save_dir}/losses.csv")
+        pd.DataFrame(true_Es_t, columns=eval_iterations).to_csv(f"{save_dir}/true_Es_t.csv")
+        pd.DataFrame(pred_Es_t, columns=eval_iterations).to_csv(f"{save_dir}/pred_Es_t.csv")
 
 # %% [markdown]
 # ## Training Performance Visualization
@@ -690,11 +789,15 @@ import pandas as pd
 
 hvplot.extension('matplotlib')
 
-losses = pd.read_csv(f"./seq_len={seq_len}/{trial_name}/losses.csv")["0"]
-loss_fig = losses.hvplot(
-    title="Training loss progress", ylabel="loss", xlabel="Training epochs", logy=True
-).opts(fig_size=600, fontscale=2, aspect=1.2)
-loss_fig
+if not has_cache:
+    try:
+        losses = pd.read_csv(f"{save_dir}/losses.csv")["0"]
+        loss_fig = losses.hvplot(
+            title="Training loss progress", ylabel="loss", xlabel="Training epochs", logy=True
+        ).opts(fig_size=600, fontscale=2, aspect=1.2)
+        loss_fig
+    except Exception as e:
+        print(f"Skipping training loss plot: {e}")
 
 # %% [markdown]
 # ## GQE Energy Predictions vs. True Energies
@@ -702,30 +805,34 @@ loss_fig
 # We plot the mean and range of the GQE-predicted energy sequences against their true quantum simulator energy values, demonstrating how the generator converges towards the ground-state energy.
 
 # %%
-df_true = pd.read_csv(f"./seq_len={seq_len}/{trial_name}/true_Es_t.csv").iloc[:, 1:]
-df_pred = pd.read_csv(f"./seq_len={seq_len}/{trial_name}/pred_Es_t.csv").iloc[:, 1:]
+if not has_cache:
+    try:
+        df_true = pd.read_csv(f"{save_dir}/true_Es_t.csv").iloc[:, 1:]
+        df_pred = pd.read_csv(f"{save_dir}/pred_Es_t.csv").iloc[:, 1:]
 
-df_true.columns = df_true.columns.astype(int)
-df_pred.columns = df_pred.columns.astype(int)
+        df_true.columns = df_true.columns.astype(int)
+        df_pred.columns = df_pred.columns.astype(int)
 
-df_trues_stats = pd.concat([df_true.mean(axis=0), df_true.min(axis=0), df_true.max(axis=0)], axis=1).reset_index()
-df_trues_stats.columns = ["Training Iterations", "Ave True E", "Min True E", "Max True E"]
+        df_trues_stats = pd.concat([df_true.mean(axis=0), df_true.min(axis=0), df_true.max(axis=0)], axis=1).reset_index()
+        df_trues_stats.columns = ["Training Iterations", "Ave True E", "Min True E", "Max True E"]
 
-df_preds_stats = pd.concat([df_pred.mean(axis=0), df_pred.min(axis=0), df_pred.max(axis=0)], axis=1).reset_index()
-df_preds_stats.columns = ["Training Iterations", "Ave Pred E", "Min Pred E", "Max Pred E"]
+        df_preds_stats = pd.concat([df_pred.mean(axis=0), df_pred.min(axis=0), df_pred.max(axis=0)], axis=1).reset_index()
+        df_preds_stats.columns = ["Training Iterations", "Ave Pred E", "Min Pred E", "Max Pred E"]
 
-fig = (
-    df_trues_stats.hvplot.scatter(x="Training Iterations", y="Ave True E", label="Mean True Energies") * 
-    df_trues_stats.hvplot.line(x="Training Iterations", y="Ave True E", alpha=0.5, linewidth=1) * 
-    df_trues_stats.hvplot.area(x="Training Iterations", y="Min True E", y2="Max True E", alpha=0.1)
-) * (
-    df_preds_stats.hvplot.scatter(x="Training Iterations", y="Ave Pred E", label="Mean Predicted Energies") * 
-    df_preds_stats.hvplot.line(x="Training Iterations", y="Ave Pred E", alpha=0.5, linewidth=1) * 
-    df_preds_stats.hvplot.area(x="Training Iterations", y="Min Pred E", y2="Max Pred E", alpha=0.1)
-)
-fig = fig * hv.Curve([[0, grd_E], [10000, grd_E]], label="Ground State Energy").opts(color="k", alpha=0.4, linestyle="dashed")
-fig = fig.opts(ylabel="Sequence Energies", title="GQE Evaluations", fig_size=600, fontscale=2)
-fig
+        fig = (
+            df_trues_stats.hvplot.scatter(x="Training Iterations", y="Ave True E", label="Mean True Energies") * 
+            df_trues_stats.hvplot.line(x="Training Iterations", y="Ave True E", alpha=0.5, linewidth=1) * 
+            df_trues_stats.hvplot.area(x="Training Iterations", y="Min True E", y2="Max True E", alpha=0.1)
+        ) * (
+            df_preds_stats.hvplot.scatter(x="Training Iterations", y="Ave Pred E", label="Mean Predicted Energies") * 
+            df_preds_stats.hvplot.line(x="Training Iterations", y="Ave Pred E", alpha=0.5, linewidth=1) * 
+            df_preds_stats.hvplot.area(x="Training Iterations", y="Min Pred E", y2="Max Pred E", alpha=0.1)
+        )
+        fig = fig * hv.Curve([[0, grd_E], [10000, grd_E]], label="Ground State Energy").opts(color="k", alpha=0.4, linestyle="dashed")
+        fig = fig.opts(ylabel="Sequence Energies", title="GQE Evaluations", fig_size=600, fontscale=2)
+        fig
+    except Exception as e:
+        print(f"Skipping evaluation stats plot: {e}")
 
 # %% [markdown]
 # ## Evaluation Summary
@@ -733,41 +840,42 @@ fig
 # We compare the statistics (average, minimum, and maximum energy) of random sequences against the outputs of the latest trained model and the best-performing model checkpoint.
 
 # %%
-# Latest model
-gen_kwargs = {
-    "n_sequences": 128, 
-    "max_new_tokens": seq_len, 
-    "temperature": 0.001, 
-    "device": device
-}
-if USE_DIT:
-    gen_kwargs["energies"] = grd_E
+if not has_cache:
+    # Latest model
+    gen_kwargs = {
+        "n_sequences": 128, 
+        "max_new_tokens": seq_len, 
+        "temperature": 0.001, 
+        "device": device
+    }
+    if USE_DIT:
+        gen_kwargs["energies"] = grd_E
 
-gen_token_seq_, _ = gpt.generate(**gen_kwargs)
-gen_inds_ = (gen_token_seq_[:, 1:] - 1).cpu().numpy()
-gen_op_seq_ = op_pool[gen_inds_]
-true_Es_ = get_subsequence_energies(gen_op_seq_)[:, -1].reshape(-1, 1)
+    gen_token_seq_, _ = gpt.generate(**gen_kwargs)
+    gen_inds_ = (gen_token_seq_[:, 1:] - 1).cpu().numpy()
+    gen_op_seq_ = op_pool[gen_inds_]
+    true_Es_ = get_subsequence_energies(gen_op_seq_)[:, -1].reshape(-1, 1)
 
-# Best model
-loaded = torch.load(f"./seq_len={seq_len}/{trial_name}/gqe.pt", map_location=device, weights_only=False)
-loaded_token_seq_, _ = loaded.generate(**gen_kwargs)
-loaded_inds_ = (loaded_token_seq_[:, 1:] - 1).cpu().numpy()
-loaded_op_seq_ = op_pool[loaded_inds_]
-loaded_true_Es_ = get_subsequence_energies(loaded_op_seq_)[:, -1].reshape(-1, 1)
+    # Best model
+    loaded = torch.load(f"{save_dir}/gqe.pt", map_location=device, weights_only=False)
+    loaded_token_seq_, _ = loaded.generate(**gen_kwargs)
+    loaded_inds_ = (loaded_token_seq_[:, 1:] - 1).cpu().numpy()
+    loaded_op_seq_ = op_pool[loaded_inds_]
+    loaded_true_Es_ = get_subsequence_energies(loaded_op_seq_)[:, -1].reshape(-1, 1)
 
-# Summary table
-df_compare_Es = pd.DataFrame({
-    "Source": ["Random", "Latest Model", "Best Model"], 
-    "Aves": [train_sub_seq_en[:, -1].mean(), true_Es_.mean(), loaded_true_Es_.mean()],
-    "Mins": [train_sub_seq_en[:, -1].min(), true_Es_.min(), loaded_true_Es_.min()],
-    "Maxs": [train_sub_seq_en[:, -1].max(), true_Es_.max(), loaded_true_Es_.max()],
-    "Mins_error": [
-        abs(train_sub_seq_en[:, -1].min() - grd_E),
-        abs(true_Es_.min() - grd_E),
-        abs(loaded_true_Es_.min() - grd_E),
-    ],
-})
-df_compare_Es
+    # Summary table
+    df_compare_Es = pd.DataFrame({
+        "Source": ["Random", "Latest Model", "Best Model"], 
+        "Aves": [train_sub_seq_en[:, -1].mean(), true_Es_.mean(), loaded_true_Es_.mean()],
+        "Mins": [train_sub_seq_en[:, -1].min(), true_Es_.min(), loaded_true_Es_.min()],
+        "Maxs": [train_sub_seq_en[:, -1].max(), true_Es_.max(), loaded_true_Es_.max()],
+        "Mins_error": [
+            abs(train_sub_seq_en[:, -1].min() - grd_E),
+            abs(true_Es_.min() - grd_E),
+            abs(loaded_true_Es_.min() - grd_E),
+        ],
+    })
+    df_compare_Es
 
 # %% [markdown]
 # # Step 2: Quantum Self-Consistent Equation-of-Motion (q-sc-EOM)
@@ -777,88 +885,151 @@ df_compare_Es
 # 2. Doubly ionized energy levels (DIP space, $N-2$ electrons).
 
 # %%
-from qsceom import qscEOM
+if 'has_cache' not in globals():
+    import os
+    current_file_dir = get_current_file_dir()
+    cache_dir = os.path.join(current_file_dir, "datasets", "qsceom")
+    use_avas_val = globals().get("USE_AVAS", False)
+    cache_suffix = "_avas" if use_avas_val else ""
+    cache_path = os.path.join(cache_dir, f"qsceom_cache{cache_suffix}.pkl")
+    has_cache = os.path.exists(cache_path)
+    seq_len = 4
+    trial_name = "trial_h2o"
+    if use_avas_val:
+        trial_name += "_avas"
+    save_dir = os.path.abspath(os.path.join(current_file_dir, f"./seq_len={seq_len}/{trial_name}"))
 
-# 1. Identify the best sequence of operations from the trained Generative Quantum Eigensolver (GQE)
-best_seq_idx = np.argmin(loaded_true_Es_)
-best_op_seq = loaded_op_seq_[best_seq_idx]
+if not has_cache:
+    from qsceom import qscEOM
 
-# 2. Extract parameters and excitations for qscEOM compatibility
-params = []
-ash_excitation = []
+    # 1. Identify the best sequence of operations from the trained Generative Quantum Eigensolver (GQE)
+    best_seq_idx = np.argmin(loaded_true_Es_)
+    best_op_seq = loaded_op_seq_[best_seq_idx]
 
-for op in best_op_seq:
-    # Skip Identity operators which have no effect on state preparation in this context
-    if isinstance(op, qml.Identity) or getattr(op, "name", "") == "Identity" or (hasattr(op, "base") and isinstance(op.base, qml.Identity)):
-        continue
-    
-    # Extract the parameter (time/angle) and the wires (excitation indices)
-    # This maps the GQE state preparation to standard qscEOM parameterized inputs
-    if len(op.parameters) > 0:
-        params.append(float(op.parameters[0]))
-        ash_excitation.append(tuple(op.wires.tolist()))
+    # 2. Extract parameters and excitations for qscEOM compatibility
+    params = []
+    ash_excitation = []
 
-# 3. Retrieve molecule details directly from the in-memory dictionary to prevent redundant downloads/DNS errors!
-symbols = qchem_data["symbols"]
-geometry = qchem_data["geometry"]
-active_electrons = qchem_data["active_electrons"]
-active_orbitals = qchem_data["active_orbitals"]
-charge = 0 # Default calculation assumes a neutral molecule (e.g. H2)
+    for op in best_op_seq:
+        # Skip Identity operators which have no effect on state preparation in this context
+        if isinstance(op, qml.Identity) or getattr(op, "name", "") == "Identity" or (hasattr(op, "base") and isinstance(op.base, qml.Identity)):
+            continue
+        
+        # Extract the parameter (time/angle) and the wires (excitation indices)
+        # This maps the GQE state preparation to standard qscEOM parameterized inputs
+        if len(op.parameters) > 0:
+            params.append(float(op.parameters[0]))
+            wires = op.wires.tolist()
+            if USE_AVAS and target_molecule == "H2O":
+                # Shift wires by +2 to map 12-qubit active space to 14-qubit full space
+                wires = [w + 2 for w in wires]
+            ash_excitation.append(tuple(wires))
 
-print(f"Preparing q-sc-EOM for {target_molecule}...")
-print(f"Number of excitations in reference ansatz from GQE: {len(params)}")
+    # 3. Retrieve molecule details directly from the in-memory dictionary to prevent redundant downloads/DNS errors!
+    symbols = qchem_data["symbols"]
+    geometry = qchem_data["geometry"]
+    if USE_AVAS and target_molecule == "H2O":
+        # qscEOM must run on the full space (10 e-, 7 orbitals) to compute core-ionized states
+        active_electrons = 10
+        active_orbitals = 7
+    else:
+        active_electrons = qchem_data["active_electrons"]
+        active_orbitals = qchem_data["active_orbitals"]
+    charge = 0 # Default calculation assumes a neutral molecule (e.g. H2)
 
-# Resolve absolute path for pyscf datasets directory
-import os
-try:
-    current_file_dir = os.path.dirname(os.path.abspath(__file__))
-except NameError:
-    current_file_dir = os.getcwd()
-datasets_pyscf_dir = os.path.abspath(os.path.join(current_file_dir, "./datasets/pyscf"))
-os.makedirs(datasets_pyscf_dir, exist_ok=True)
+    print(f"Preparing q-sc-EOM for {target_molecule}...")
+    print(f"Number of excitations in reference ansatz from GQE: {len(params)}")
 
-# 4. Run qscEOM to compute the energies (IP and DIP spaces)
-# Run 1: IP space (Core-hole state, N-1 electrons)
-qsceom_ip_res = qscEOM(
-    symbols=symbols,
-    geometry=geometry,
-    active_electrons=active_electrons - 1,
-    active_orbitals=active_orbitals,
-    charge=charge + 1,
-    mult=2, # Open shell N-1 -> Doublet
-    params=params,
-    ash_excitation=ash_excitation,
-    ansatz_type="qubit_excitation",
-    basis="sto-3g",
-    method="openfermion", # Needed to support open shell
-    shots=0, 
-    return_details=True,
-    outpath=datasets_pyscf_dir
-)
-eigs_ip, details_ip = qsceom_ip_res
-print("\nq-sc-EOM IP (N-1) state energies:")
-print(eigs_ip)
+    # Resolve absolute path for pyscf datasets directory
+    import os
+    current_file_dir = get_current_file_dir()
+    datasets_pyscf_dir = os.path.abspath(os.path.join(current_file_dir, "./datasets/pyscf"))
+    os.makedirs(datasets_pyscf_dir, exist_ok=True)
 
-# Run 2: DIP space (Double-hole state, N-2 electrons)
-qsceom_dip_res = qscEOM(
-    symbols=symbols,
-    geometry=geometry,
-    active_electrons=active_electrons - 2,
-    active_orbitals=active_orbitals,
-    charge=charge + 2,
-    mult=1, # N-2 -> Singlet (or Triplet depending on states, Singlet used for basis setup)
-    params=params,
-    ash_excitation=ash_excitation,
-    ansatz_type="qubit_excitation",
-    basis="sto-3g",
-    method="openfermion", # Consistency
-    shots=0, 
-    return_details=True,
-    outpath=datasets_pyscf_dir
-)
-eigs_dip, details_dip = qsceom_dip_res
-print("\nq-sc-EOM DIP (N-2) state energies:")
-print(eigs_dip)
+    # 4. Run qscEOM to compute the energies (IP and DIP spaces)
+    # Run 1: IP space (Core-hole state, N-1 electrons)
+    qsceom_ip_res = qscEOM(
+        symbols=symbols,
+        geometry=geometry,
+        active_electrons=active_electrons - 1,
+        active_orbitals=active_orbitals,
+        charge=charge + 1,
+        mult=2, # Open shell N-1 -> Doublet
+        params=params,
+        ash_excitation=ash_excitation,
+        ansatz_type="qubit_excitation",
+        basis="sto-3g",
+        method="openfermion", # Needed to support open shell
+        shots=0, 
+        return_details=True,
+        outpath=datasets_pyscf_dir
+    )
+    eigs_ip, details_ip = qsceom_ip_res
+    print("\nq-sc-EOM IP (N-1) state energies:")
+    print(eigs_ip)
+
+    # Run 2: DIP space (Double-hole state, N-2 electrons)
+    qsceom_dip_res = qscEOM(
+        symbols=symbols,
+        geometry=geometry,
+        active_electrons=active_electrons - 2,
+        active_orbitals=active_orbitals,
+        charge=charge + 2,
+        mult=1, # N-2 -> Singlet (or Triplet depending on states, Singlet used for basis setup)
+        params=params,
+        ash_excitation=ash_excitation,
+        ansatz_type="qubit_excitation",
+        basis="sto-3g",
+        method="openfermion", # Consistency
+        shots=0, 
+        return_details=True,
+        outpath=datasets_pyscf_dir
+    )
+    eigs_dip, details_dip = qsceom_dip_res
+    print("\nq-sc-EOM DIP (N-2) state energies:")
+    print(eigs_dip)
+
+    # Save to cache
+    os.makedirs(cache_dir, exist_ok=True)
+    cache_data = {
+        "eigs_ip": eigs_ip,
+        "details_ip": details_ip,
+        "eigs_dip": eigs_dip,
+        "details_dip": details_dip,
+        "symbols": symbols,
+        "geometry": geometry,
+        "active_electrons": active_electrons,
+        "active_orbitals": active_orbitals,
+        "charge": charge,
+        "init_state": init_state,
+        "params": params,
+        "ash_excitation": ash_excitation,
+        "USE_DIT": USE_DIT if 'USE_DIT' in globals() else False,
+        "USE_AVAS": USE_AVAS if 'USE_AVAS' in globals() else False,
+        "grd_E": grd_E if 'grd_E' in globals() else None,
+    }
+    with open(cache_path, "wb") as f:
+        pickle.dump(cache_data, f)
+    print(f"Saved q-sc-EOM results and molecular parameters to cache: {cache_path}")
+else:
+    print(f"Loading q-sc-EOM results and molecular parameters from cache: {cache_path}")
+    with open(cache_path, "rb") as f:
+        cache_data = pickle.load(f)
+    eigs_ip = cache_data["eigs_ip"]
+    details_ip = cache_data["details_ip"]
+    eigs_dip = cache_data["eigs_dip"]
+    details_dip = cache_data["details_dip"]
+    symbols = cache_data["symbols"]
+    geometry = cache_data["geometry"]
+    active_electrons = cache_data["active_electrons"]
+    active_orbitals = cache_data["active_orbitals"]
+    charge = cache_data["charge"]
+    init_state = cache_data["init_state"]
+    params = cache_data["params"]
+    ash_excitation = cache_data["ash_excitation"]
+    USE_DIT = cache_data.get("USE_DIT", False)
+    if cache_data.get("grd_E") is not None:
+        grd_E = cache_data["grd_E"]
 
 # %% [markdown]
 # # Step 2.5: Minimal Basis Projection of Atomic Integrals
@@ -871,6 +1042,34 @@ print(eigs_dip)
 from pyscf import gto, scf, ao2mo
 import torch
 import numpy as np
+import pickle
+import os
+
+if 'symbols' not in globals():
+    current_file_dir = get_current_file_dir()
+    cache_dir = os.path.join(current_file_dir, "datasets", "qsceom")
+    use_avas_val = globals().get("USE_AVAS", False)
+    cache_suffix = "_avas" if use_avas_val else ""
+    cache_path = os.path.join(cache_dir, f"qsceom_cache{cache_suffix}.pkl")
+    if os.path.exists(cache_path):
+        print(f"Loading variables from cache for Step 2.5: {cache_path}")
+        with open(cache_path, "rb") as f:
+            cache_data = pickle.load(f)
+        eigs_ip = cache_data["eigs_ip"]
+        details_ip = cache_data["details_ip"]
+        eigs_dip = cache_data["eigs_dip"]
+        details_dip = cache_data["details_dip"]
+        symbols = cache_data["symbols"]
+        geometry = cache_data["geometry"]
+        active_electrons = cache_data["active_electrons"]
+        active_orbitals = cache_data["active_orbitals"]
+        charge = cache_data["charge"]
+        init_state = cache_data["init_state"]
+        params = cache_data["params"]
+        ash_excitation = cache_data["ash_excitation"]
+        USE_DIT = cache_data.get("USE_DIT", False)
+        if cache_data.get("grd_E") is not None:
+            grd_E = cache_data["grd_E"]
 
 device = torch.device("mps" if torch.backends.mps.is_available() else "cpu")
 
@@ -911,27 +1110,34 @@ C_mbs = np.linalg.inv(T) @ U @ C_full  # MBS coefficients (n_mbs × norb)
 
 print(f"Projected MO coefficients to MBS: shape {C_mbs.shape}")
 
-# 6. Extract atomic integrals and contract with projection coefficients
-# We need to build V_pq from atomic integrals centered on the core site
-# For now, use PySCF MO integrals as proxy, but contract with MBS projection
-core_idx = 0
+# 6. Extract atomic integrals in the AO basis and project using C_mbs
+eri_ao = mol.intor("int2e")  # AO basis 2-electron integrals (nao, nao, nao, nao)
+core_ao_idx = 0  # Oxygen 1s core AO in H2O is index 0
 active_indices = list(range(active_orbitals))
 
-# Contract: V^atom_pq = sum_μ,c D_μc * (cp|qc) in full MO basis
-# This approximates the atomic integral contraction
-V_pq_projected = np.zeros((active_orbitals, active_orbitals))
-for p_idx, p in enumerate(active_indices):
-    for q_idx, q in enumerate(active_indices):
-        # Integrate MO integrals with MBS projection
-        # V_pq ≈ ⟨p core| |q core⟩_atom via D contraction
-        V_pq_projected[p_idx, q_idx] = eri_mo_matrix[core_idx, p, q, core_idx]
+# Use Oxygen valence atomic orbitals (2s, 2px, 2py, 2pz) as continuum proxies
+f_orbitals = [1, 2, 3, 4]
 
-V_pq_numpy = V_pq_projected
+# OCA approximation: contract the emitter AO-basis integrals with MBS projection C_mbs (D)
+# For each continuum channel f, V_pq = sum_{μ,ν ∈ emitter} D_{μ,p} * D_{ν,q} * [ (f mu | c nu) - (f nu | c mu) ]
+V_pq_channels = []
+for f_ao in f_orbitals:
+    V_pq_projected = np.zeros((active_orbitals, active_orbitals))
+    for p_idx, p in enumerate(active_indices):
+        for q_idx, q in enumerate(active_indices):
+            val = 0.0
+            for i, mu in enumerate(mbs_indices):
+                for j, nu in enumerate(mbs_indices):
+                    ao_int_direct = eri_ao[f_ao, mu, core_ao_idx, nu]
+                    ao_int_exchange = eri_ao[f_ao, nu, core_ao_idx, mu]
+                    val += C_mbs[i, p] * C_mbs[j, q] * (ao_int_direct - ao_int_exchange)
+            V_pq_projected[p_idx, q_idx] = val
+    V_pq_channels.append(V_pq_projected)
+
+V_pq_numpy = np.array(V_pq_channels)  # Shape: (n_f, active_orbitals, active_orbitals)
 V_pq = torch.tensor(V_pq_numpy, device=device, dtype=torch.float32)
 
-print(f"\n⚠️  NOTE: This uses PySCF MO integrals as proxy.")
-print(f"For rigorous OCA, should use OpenMolcas atomic integral tables (Sec. II.3 of paper).")
-print(f"Constructed V_pq tensor: shape {V_pq.shape}")
+print(f"Constructed projected V_pq tensor using OCA projection: shape {V_pq.shape}")
 
 # %% [markdown]
 # # Step 3: One-Center Approximation (OCA) & Auger Transition Intensities
@@ -1016,10 +1222,8 @@ print(f"Constructing {n_spin_full}x{n_spin_full} spin RDM tensors based on activ
 
 # 3. Generate the Transition RDMs (gamma_pq) with robust core-spin selection
 print("Computing transition RDM (gamma_pq)...")
-init_occ = [int(i) for i, bit in enumerate(np.asarray(init_state, dtype=int)) if int(bit) == 1]
-core_spin_candidates = [i for i in (0, 1) if i < len(init_state) and int(np.asarray(init_state, dtype=int)[i]) == 1]
-if not core_spin_candidates:
-    core_spin_candidates = [0]
+full_init_occ = list(range(active_electrons))
+core_spin_candidates = [0, 1]
 
 core_channel_scan = []
 best_choice = None
@@ -1029,7 +1233,7 @@ for core_spin_idx_try in core_spin_candidates:
         C_IP, C_DIP, list_IP, list_DIP, core_idx=core_spin_idx_try, n_spin=n_spin_full
     )
 
-    core_hole_occ_try = [i for i in init_occ if i != core_spin_idx_try]
+    core_hole_occ_try = [i for i in full_init_occ if i != core_spin_idx_try]
     if core_hole_occ_try in list_IP:
         core_hole_basis_idx_try = list_IP.index(core_hole_occ_try)
         overlap_vec_try = np.abs(np.asarray(details_ip["eigenvectors"])[core_hole_basis_idx_try, :]) ** 2
@@ -1065,15 +1269,19 @@ gamma_pq_tensor = best_choice["gamma_tensor"]
 gamma_pq = gamma_pq_tensor[:, target_IP_state, :, :].cpu()
 
 # 4. Spin-orbital expansion for classical integrals (V_pq)
-V_lmpq_spin = torch.zeros((1, 1, n_spin_full, n_spin_full), dtype=torch.float64)
+# V_pq has shape (n_f, active_orbitals, active_orbitals)
+V_pq_cpu = V_pq.detach().cpu().to(torch.float64)
+V_lmpq_spin = torch.zeros((len(f_orbitals), 1, n_spin_full, n_spin_full), dtype=torch.float64)
 
 # Populate all spin-channel pairs to avoid artificial zeroing from spin-map mismatch
-for i, act_i in enumerate(active_indices):
-    for j, act_j in enumerate(active_indices):
-        val = V_pq_cpu[i, j]
-        for s1 in (0, 1):
-            for s2 in (0, 1):
-                V_lmpq_spin[:, :, act_i * 2 + s1, act_j * 2 + s2] = val
+# Use the local active space indices i and j to index V_lmpq_spin
+for f_idx in range(len(f_orbitals)):
+    for i, act_i in enumerate(active_indices):
+        for j, act_j in enumerate(active_indices):
+            val = V_pq_cpu[f_idx, i, j]
+            for s1 in (0, 1):
+                for s2 in (0, 1):
+                    V_lmpq_spin[f_idx, 0, i * 2 + s1, j * 2 + s2] = val
 
 # 5. Tensor contraction (OCA) in complex128 for numerical stability
 amplitudes = torch.einsum(
