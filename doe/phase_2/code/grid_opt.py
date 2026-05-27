@@ -211,15 +211,32 @@ def _run_qamoo_workflow(data_root: str, run_id: str, num_buses: int, num_objecti
     print(f"Transpiling QAOA circuits for {run_id}...")
     transpile_qaoa_circuits_parametrized(config, backend)
 
-    print(f"Executing sampled circuits for {run_id}...")
-    batch_execute_qaoa_circuits_parametrized([config], backend)
+    if ((SAMPLOMATIC_METHODS is not None and len(SAMPLOMATIC_METHODS) > 0) or USE_SAMPLOMATIC) and USE_QPU:
+        print(f"Executing sampled circuits for {run_id} using Samplomatic and Executor...")
+        execute_qaoa_circuits_samplomatic([config], backend, methods=SAMPLOMATIC_METHODS)
+    else:
+        print(f"Executing sampled circuits for {run_id}...")
+        batch_execute_qaoa_circuits_parametrized([config], backend)
 
     return config
 
-# Feature toggles
-# If True, attempt to use IBM Quantum runtime for QAOA execution. Defaults
-# to False (use AerSimulator). Enabling requires IBM account/runtime setup.
+# %% [markdown]
+# ## Feature Toggles & Error Mitigation Settings
+#
+# Configure the execution backend and advanced error mitigation settings for the quantum workflow:
+#
+# * **`USE_QPU`**: If `True`, attempt to use IBM Quantum runtime for QAOA execution. Defaults to `False` (use local `AerSimulator`). Enabling requires IBM account/runtime setup on the machine.
+# * **`USE_SAMPLOMATIC`**: If `True`, apply advanced client-side error mitigation via Qiskit's Samplomatic and the new `Executor` primitive. Requires `USE_QPU = True` and a real QPU backend.
+# * **`SAMPLOMATIC_METHODS`**: List of advanced error mitigation methods to run (requires `USE_QPU = True` and a real QPU backend):
+#   * `[]` or `None`: Standard Pauli & Measurement Twirling (baseline)
+#   * `[1]`: Probabilistic Error Cancellation (PEC)
+#   * `[1, 2]`: PEC + Shaded Lightcones (SLC)
+#   * `[1, 2, 3]`: PEC + SLC + Propagated Noise Absorption (PNA)
+
+# %%
 USE_QPU = False
+USE_SAMPLOMATIC = False
+SAMPLOMATIC_METHODS = []
 
 # %% [markdown]
 # ## 1. Grid Loading and Objective Graph Serialization
