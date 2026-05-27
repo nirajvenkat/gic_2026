@@ -29,7 +29,7 @@
 # # Quantum-Enhanced Strategic Siting of Energy Storage and Microgrids
 # **Team Name:** Entangled Trio
 #
-# This notebook demonstrates the QAMOO-based multi-objective optimization for strategic siting of energy storage and microgrids. We evaluate this over a Pandapower grid (e.g., IEEE-14) considering 3 objectives:
+# This notebook demonstrates the QAMOO-based multi-objective optimization for strategic siting of energy storage and microgrids. We evaluate this over a Pandapower grid (e.g., IEEE-33) considering 3 objectives:
 # 1. **Resilience / Reliability ($C_R$)**
 # 2. **Capital Investment ($C_I$)**
 # 3. **Voltage-Control Quality ($C_{VC}$)**
@@ -175,8 +175,15 @@ def _train_qaoa_parameters(problem_folder: str, p_layers: int, num_objectives: i
 
 
 def _run_qamoo_workflow(data_root: str, run_id: str, num_buses: int, num_objectives: int, num_samples: int, p_layers: int):
-    backend = AerSimulator(method='matrix_product_state', matrix_product_state_max_bond_dimension=20, max_parallel_threads=1)
-    backend.options.use_fractional_gates = False
+    if USE_QPU:
+        from qiskit_ibm_runtime import QiskitRuntimeService
+        print("Connecting to IBM Quantum runtime...")
+        service = QiskitRuntimeService()
+        backend = service.least_busy(min_num_qubits=num_buses, simulator=False, operational=True)
+        print(f"Using QPU backend: {backend.name}")
+    else:
+        backend = AerSimulator(method='matrix_product_state', matrix_product_state_max_bond_dimension=20, max_parallel_threads=1)
+        backend.options.use_fractional_gates = False
 
     problem = ProblemSpecification()
     problem.data_folder = data_root
@@ -218,7 +225,7 @@ USE_QPU = False
 # ## 1. Grid Loading and Objective Graph Serialization
 
 # %%
-# Load IEEE-14 system (can be replaced with case33bw() for IEEE-33)
+# Load IEEE-33 system
 net = nw.case33bw()
 num_buses = len(net.bus)
 print(f"Loaded grid with {num_buses} buses.")
