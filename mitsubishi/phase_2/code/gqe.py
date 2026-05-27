@@ -56,7 +56,17 @@ def get_current_file_dir():
 
 current_file_dir = get_current_file_dir()
 
-# Parameters
+# %% [markdown]
+# ## Parameter Settings
+#
+# Configure the execution parameters for the simulation:
+#
+# * **`USE_CUDAQ`**: If `True`, use NVIDIA's CUDA-Q backend for GPU-accelerated quantum simulation.
+# * **`USE_DIT`**: If `True`, enable Double Ionization Threshold (DIT) filtering for the active space.
+# * **`USE_AVAS`**: If `True`, apply Active Space Selection (AVAS) to reduce the molecular active space size.
+# * **`USE_H2O_OPTIMIZATIONS`**: If `True`, enable specialized performance optimizations optimized for the H2O (water) molecule.
+
+# %%
 USE_CUDAQ = False
 USE_DIT = False
 USE_AVAS = False
