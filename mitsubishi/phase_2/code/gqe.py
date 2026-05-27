@@ -62,9 +62,9 @@ current_file_dir = get_current_file_dir()
 # Configure the execution parameters for the simulation:
 #
 # * **`USE_CUDAQ`**: If `True`, use NVIDIA's CUDA-Q backend for GPU-accelerated quantum simulation.
-# * **`USE_DIT`**: If `True`, enable Double Ionization Threshold (DIT) filtering for the active space.
+# * **`USE_DIT`**: If `True`, enable Diffusion Transformer (DIT) for GQE training as an alternative to the auto-regressive GPTnano.
 # * **`USE_AVAS`**: If `True`, apply Active Space Selection (AVAS) to reduce the molecular active space size.
-# * **`USE_H2O_OPTIMIZATIONS`**: If `True`, enable specialized performance optimizations optimized for the H2O (water) molecule.
+# * **`USE_H2O_OPTIMIZATIONS`**: If `True`, enable specialized performance optimizations for the $\rm H_2O$ molecule.
 
 # %%
 USE_CUDAQ = False
