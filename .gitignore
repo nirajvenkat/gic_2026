@@ -272,7 +272,7 @@ mitsubishi/external/code/data
 mitsubishi/external/code/datasets
 mitsubishi/external/code/runs
 mitsubishi/external/code/seq_*
-mitsubishi/phase_2/code/datasets
+mitsubishi/phase_2/code/data
 mitsubishi/phase_2/code/seq_*
 doe/phase_2/code/data
 doe/phase_2/code/data_benders
