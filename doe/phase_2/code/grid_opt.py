@@ -526,9 +526,9 @@ def solve_classical_mo_dpa(num_qubits, problem_dir, num_objectives):
             
         if idx == num_objectives - 1:
             # the last constraint's LB encodes the number of objectives in DPA
-            mdl.add_constraint(-obj_expr >= num_objectives, ctname=f"obj_{idx}")
+            mdl.add_constraint(obj_expr >= num_objectives, ctname=f"obj_{idx}")
         else:
-            mdl.add_constraint(-obj_expr >= 0, ctname=f"obj_{idx}")
+            mdl.add_constraint(obj_expr >= 0, ctname=f"obj_{idx}")
             
     mdl.maximize(0)
     lp_path = f"{problem_dir}/dpa_problem.lp"
@@ -558,7 +558,7 @@ def solve_classical_mo_dpa(num_qubits, problem_dir, num_objectives):
             if len(vals) >= num_objectives:
                 # DPA is fed with -obj_expr constraints; flip signs back to original maximization values.
                 raw = vals[-num_objectives:]
-                pareto_points.append([-v for v in raw])
+                pareto_points.append(raw)
     
     pts = np.array(pareto_points, dtype=float)
     print(f"DPA parsed points: {pts.shape}")
@@ -619,11 +619,15 @@ except Exception as e:
 # ## 7. Multi-Metric Pareto Quality Analysis
 # The single discrepancy percentage is limited, so we add standard multi-objective indicators from optimization literature.
 #
-# - **Hypervolume (HV)**: volume dominated by a Pareto set w.r.t. a reference point (higher is better in our maximization setting after conversion).
-# - **IGD** (Inverted Generational Distance): distance from reference Pareto set to an approximate set (lower is better).
-# - **Additive Epsilon Indicator** ($\\epsilon^+$): minimum additive shift for one front to weakly dominate another in minimization form (lower is better; $\\le 0$ is very strong).
-# - **Coverage** $C(A,B)$: fraction of points in $B$ dominated by points in $A$ (higher is better).
-# - **Spacing**: spread/uniformity of points along a front (lower is better).
+# - **|PF|**: Size of the Pareto Front (number of non-dominated points).
+# - **Hypervolume (HV)**: The volume of the objective space dominated by a Pareto set w.r.t. a reference point (higher is better).
+# - **IGD** (Inverted Generational Distance): The average distance from the reference (exact union) set to the nearest points in the evaluated set (lower is better).
+# - **Spacing**: A measure of the spread/uniformity of points along the front (lower is better). If the front has only 1 point, there is no spread, so this is undefined (`N/A`).
+# - **Additive Epsilon Indicator** ($\epsilon^+$): The minimum additive shift required for the evaluated front to weakly dominate the reference (exact union) front (lower is better).
+# - **Coverage** $C(A,B)$: The fraction of points in $B$ dominated by at least one point in $A$ (higher is better).
+#   - **C(A,B)**: The fraction of the exact reference union dominated by the method's front.
+#   - **C(B,A)**: The fraction of the method's front dominated by the exact reference union.
+#   - *Note*: $C(A, B)$ is asymmetric because it measures how well set $A$ covers/dominates set $B$. If $A$ is high-quality (e.g. exact union) and $B$ is low-quality, $C(A, B)$ is high while $C(B, A)$ is $0.0$.
 #
 # We treat CPLEX and DPA outputs as the **exact reference union** when available.
 
@@ -697,6 +701,7 @@ def _try_load_quantum_points(results_folder, m):
         "non_dominated_points.npy",
         "non_dominated_objective_values.npy",
         "pareto_points.npy",
+        "non_dominated_samples.npy",
     ]
     for fn in candidates:
         p = os.path.join(results_folder, fn)
@@ -737,28 +742,47 @@ hv = HV(ref_point=ref_point)
 methods = [
     ("QAMOO (Quantum)", q_min),
     ("Benders-QAMOO (Quantum)", benders_q_min),
-    ("CPLEX (Exact WS)", cplex_min),
-    ("DPA (Exact)", dpa_min),
+    ("CPLEX (Exact Classical WS)", cplex_min),
+    ("DPA (Exact Classical)", dpa_min),
 ]
 
 rows = []
 for name, pts in methods:
-    rows.append({
-        "Method": name,
-        "|PF|": int(len(pts)),
-        "HV (higher better)": float(hv(pts)) if len(pts) else 0.0,
-        "IGD to exact union (lower better)": igd_metric(pts, exact_union_min),
-        "Spacing (lower better)": spacing_metric(pts),
-        "C(method, exact)": coverage_c_metric(pts, exact_union_min),
-        "C(exact, method)": coverage_c_metric(exact_union_min, pts),
-        "eps+(method, exact)": additive_epsilon_indicator(pts, exact_union_min),
-    })
+    rows.append([
+        name,
+        int(len(pts)),
+        float(hv(pts)) if len(pts) else 0.0,
+        igd_metric(pts, exact_union_min),
+        spacing_metric(pts),
+        additive_epsilon_indicator(pts, exact_union_min),
+        coverage_c_metric(pts, exact_union_min),
+        coverage_c_metric(exact_union_min, pts),
+    ])
 
-df_metrics = pd.DataFrame(rows)
+# MultiIndex columns to group the Coverage C(A,B) and C(B,A) subcolumns at the end of the table
+columns = pd.MultiIndex.from_tuples([
+    ("Method", ""),
+    ("|PF|", ""),
+    ("HV (higher better)", ""),
+    ("IGD to exact union (lower better)", ""),
+    ("Spacing (lower better)", ""),
+    ("eps+ (method, exact)", ""),
+    ("Coverage", "C(A,B)"),
+    ("Coverage", "C(B,A)"),
+])
+
+df_metrics = pd.DataFrame(rows, columns=columns)
 
 # Pretty display
 df_view = df_metrics.copy()
-for c in ["HV (higher better)", "IGD to exact union (lower better)", "Spacing (lower better)", "C(method, exact)", "C(exact, method)", "eps+(method, exact)"]:
+for c in [
+    ("HV (higher better)", ""),
+    ("IGD to exact union (lower better)", ""),
+    ("Spacing (lower better)", ""),
+    ("eps+ (method, exact)", ""),
+    ("Coverage", "C(A,B)"),
+    ("Coverage", "C(B,A)"),
+]:
     df_view[c] = df_view[c].map(lambda v: "N/A" if pd.isna(v) else f"{v:,.4f}")
 
 styled = (
