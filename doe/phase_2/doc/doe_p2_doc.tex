@@ -34,7 +34,7 @@
 % PAGE 2: INTRODUCTION, SCOPE & METHODOLOGY
 % ----------------------------------------------------
 \section{Introduction and Phase 1 Scope Comparison}
-This report outlines the implementation and results for Phase 2 of the DOE/AIST challenge on quantum-enhanced strategic siting of energy storage and microgrids. We target the resilient, cost-effective siting of clean energy resources over electrical grids under physical constraints. The underlying task is a combinatorial, multi-objective optimization balancing resilience ($C_{\rm R}$), capital cost ($C_{\rm I}$), and voltage control ($C_{\rm VC}$).
+This report outlines the implementation and results for Phase 2 of the DOE OTC challenge on quantum-enhanced strategic siting of energy storage and microgrids. We target the resilient, cost-effective siting of clean energy resources over electrical grids under physical constraints. The underlying task is a combinatorial, multi-objective optimization balancing resilience ($C_{\rm R}$), capital cost ($C_{\rm I}$), and voltage control ($C_{\rm VC}$).
 
 In Phase 1, we proposed a hybrid QAMOO~\cite{qamoo2025} and Multiverse~\cite{multiverse2023} framework with:
 \begin{itemize}[leftmargin=*,noitemsep,topsep=0pt]
@@ -101,25 +101,29 @@ To validate the performance of QAMOO and our Benders-QAMOO preprocessor, we benc
 % ----------------------------------------------------
 % PAGE 4: RESULTS CONT. & FUTURE ROADMAP
 % ----------------------------------------------------
-The evaluation measures five multi-objective optimization metrics over the simulated runs: Pareto front size ($|{\rm PF}|$), Hypervolume (${\rm HV}$), Inverted Generational Distance (${\rm IGD}$), spacing, and coverage ($C$). The results on the IEEE 33-bus system are summarized in Table~1.
+The evaluation measures key multi-objective optimization metrics over the simulated runs: Pareto front size ($|{\rm PF}|$), Hypervolume (${\rm HV}$), Inverted Generational Distance (${\rm IGD}$), spacing, additive epsilon indicator ($\epsilon^+$), and coverage ($C(A,B)$). The results on the IEEE 33-bus system are summarized in Table~1.
 
 \begin{table}[h!]
 \centering
 \caption{Pareto Quality Metrics on IEEE 33-Bus Grid}
 \vspace{0.5em}
-\begin{tabular}{lcccccc}
+\begin{tabular}{lccccccc}
 \toprule
-\textbf{Method} & $|{\rm PF}|$ & \textbf{HV} & \textbf{IGD} & \textbf{Spacing} & \textbf{C(Method, DPA)} & \textbf{C(DPA, Method)} \\
+\textbf{Method} & $|{\rm PF}|$ & \textbf{HV} & \textbf{IGD} & \textbf{Spacing} & $\epsilon^+$ & \multicolumn{2}{c}{\textbf{Coverage}} \\
+\cmidrule(lr){7-8}
+& & & & & & $C(A,B)$ & $C(B,A)$ \\
 \midrule
-QAMOO (Quantum) & 10 & 0.7421 & 0.1834 & 0.0521 & 0.1000 & 0.9000 \\
-Benders-QAMOO & 10 & 0.8953 & 0.0652 & 0.0410 & 0.4000 & 0.6000 \\
-CPLEX (Exact WS) & 14 & 0.9810 & 0.0120 & 0.0210 & 0.8500 & 0.1500 \\
-DPA (Exact) & 18 & 1.0000 & 0.0000 & 0.0180 & 1.0000 & 0.0000 \\
+QAMOO (Quantum) & 4 & 6.2512 & 28.3398 & 2.2204 & 24.5017 & 0.0000 & 1.0000 \\
+Benders-QAMOO & 2 & 71.1870 & 25.8634 & 0.0000 & 22.9644 & 0.0000 & 1.0000 \\
+CPLEX (Exact Classical WS) & 1 & 3634.3192 & 0.2829 & N/A & 0.3341 & 0.5000 & 1.0000 \\
+DPA (Exact Classical) & 1 & 3700.4377 & 0.2829 & N/A & 0.3901 & 0.5000 & 1.0000 \\
 \bottomrule
 \end{tabular}
 \end{table}
 
-The experimental results demonstrate that incorporating Benders cuts as QUBO penalties significantly improves quantum optimization performance. Benders-QAMOO achieved a hypervolume of $0.8953$ (compared to $0.7421$ for native QAMOO) and reduced the IGD from $0.1834$ to $0.0652$. This improvement is because the feasibility cuts restrict the quantum search space, penalizing invalid layouts and allowing QAOA to concentrate amplitude on high-quality, power-flow-feasible configurations.
+The experimental results demonstrate that incorporating Benders cuts as static QUBO penalties dramatically improves quantum optimization performance. Benders-QAMOO achieved a hypervolume of $71.1870$ (compared to $6.2512$ for native QAMOO), reduced the IGD from $28.3398$ to $25.8634$, and improved the additive epsilon indicator $\epsilon^+$ from $24.5017$ to $22.9644$. This significant improvement is because the classical Benders feasibility cuts add penalty weights to the QUBO diagonal, restricting the quantum search space and allowing QAOA to concentrate probability amplitude on configurations that are closer to the optimal feasible region. 
+
+Note that the exact classical benchmarks (CPLEX and DPA) collapse to a single Pareto point ($|{\rm PF}| = 1$). This is a direct mathematical consequence of the IEEE 33-bus system grid topology being a radial network (a tree graph). Since tree graphs are bipartite, a single bipartition configuration (and its complement) cuts every edge in the graph. Under a pure Max-Cut QUBO formulation, this bipartition simultaneously maximizes all three objectives, removing any trade-offs from the exact Pareto front. Similarly, because $|{\rm PF}| = 1$ for the exact methods, their spacing is mathematically undefined (${\rm N/A}$), whereas Benders-QAMOO with $|{\rm PF}| = 2$ has a spacing of $0.0000$ due to identical symmetric pairwise distances.
 
 \section{Gap Analysis and Future Work}
 Although the Benders-QAMOO preprocessor improves performance, there are key differences between this implementation and the fully integrated hybrid Benders loop proposed by PASQAL~\cite{pasqal2024}:
@@ -127,7 +131,12 @@ Although the Benders-QAMOO preprocessor improves performance, there are key diff
   \item \textbf{Offline Preprocessing vs. Online Iterative Loop:} Currently, the Benders loop is executed entirely classically beforehand. The PASQAL algorithm solves the QUBO Master Problem on the QPU in every iteration. We plan to integrate the QPU directly into the iterative Benders loop.
   \item \textbf{Heuristic Penalization vs. Exact QUBO Constraints:} Our penalty mapping uses a heuristic diagonal weight. Future work will utilize quadratic penalty terms representing the slack of inequality constraints.
   \item \textbf{Lack of Optimality Cuts:} Our prototype only generates feasibility cuts to ensure power-flow validity. We plan to implement dual-based optimality cuts to bound and optimize the objective function values.
-  \item \textbf{Simulation vs. QPU Execution:} All evaluations are run on the Aer simulator. Our next step is to transition the Benders-QAMOO loop to actual hardware QPUs, incorporating the Qiskit error-mitigation stack.
+  \item \textbf{Simulation vs. QPU Execution (Samplomatic Pipeline):} All evaluations in Phase 2 were run on the classical Aer simulator. For Phase 3, we expect to deploy the Benders-QAMOO loop on actual IBM Quantum hardware. To address device noise, we have designed the \verb|Samplomatic| client-side error-mitigation pipeline leveraging Qiskit's new \verb|Executor| primitive. This pipeline will combine three advanced mitigation techniques:
+  \begin{itemize}[noitemsep,topsep=0pt]
+    \item \textit{Probabilistic Error Cancellation (PEC):} Reconstructs noise-free expectation values by sampling from a quasi-probability distribution of noisy circuits.
+    \item \textit{Shaded Lightcones (SLC):} Optimizes query budgets by restricting mitigation operations to the active causal cones of the target measured qubits.
+    \item \textit{Propagated Noise Absorption (PNA):} Compensates for cross-talk and decay errors as they propagate through entangling layers.
+  \end{itemize}
 \end{itemize}
 
 % ----------------------------------------------------
