@@ -28,6 +28,23 @@ class ProblemSpecification:
                     self.problem_folder + f'problem_graph_{idx}.json') 
                     for idx in range(self.num_objectives)
             ]
+
+    @property
+    def objective_qps(self):
+        import pickle
+        import os
+        from qiskit_optimization.applications import Maxcut
+        qps = []
+        for idx in range(self.num_objectives):
+            pkl_path = self.problem_folder + f'problem_qp_{idx}.pkl'
+            if os.path.exists(pkl_path):
+                with open(pkl_path, 'rb') as f:
+                    qps.append(pickle.load(f))
+            else:
+                graph = ProblemGraphBuilder.deserialize(self.problem_folder + f'problem_graph_{idx}.json')
+                qp = Maxcut(graph).to_quadratic_program()
+                qps.append(qp)
+        return qps
     
     @property
     def lower_bounds(self):

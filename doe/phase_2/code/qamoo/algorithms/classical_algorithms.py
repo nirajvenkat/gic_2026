@@ -93,9 +93,6 @@ def weighted_sum(config, overwrite_results=False):
     problem = config.problem
     problem_folder = problem.problem_folder
 
-    # load problem
-    objective_graphs = problem.objective_graphs
-    
     # create results directory and raise exception if it already exists
     try:
         os.makedirs(config.results_folder)
@@ -110,8 +107,27 @@ def weighted_sum(config, overwrite_results=False):
     
     t2 = time()
 
-    # solve problems and store samples in binary format
-    samples = _get_gurobi_samples(objective_weights, objective_graphs)
+    # Check if we are using QPs
+    import os
+    import pickle
+    import fnmatch
+    pkl_files = sorted(fnmatch.filter(os.listdir(problem_folder), 'problem_qp_*.pkl'))
+    if pkl_files:
+        objective_qps = problem.objective_qps
+        from qamoo.utils.transpilation import linearize_qps
+        from qiskit_optimization.algorithms import GurobiOptimizer
+        opt = GurobiOptimizer(disp=False)
+        samples = []
+        for c in tqdm(objective_weights):
+            qp_lin = linearize_qps(objective_qps, c)
+            res = opt.solve(qp_lin)
+            samples.append(res.x)
+        samples = np.array(samples, dtype='b')
+    else:
+        # load problem
+        objective_graphs = problem.objective_graphs
+        # solve problems and store samples in binary format
+        samples = _get_gurobi_samples(objective_weights, objective_graphs)
 
     t3 = time()
 
@@ -206,13 +222,53 @@ def _mo_maxcut_milp_gurobi(graphs, c, lb):
         raise ValueError(f'Unexpected GUROBI model status: {model.Status}')
 
 
+def _mo_qp_milp_gurobi(qps, c, lb):
+    from qiskit_optimization.translators import to_gurobipy
+    # Build model using to_gurobipy for variables and constraints
+    model = to_gurobipy(qps[0])
+    model.Params.LogToConsole = 0
+    model.Params.Threads = 1
+    
+    vars = model.getVars()
+    
+    def get_gurobi_expr(qp, g_vars):
+        expr = qp.objective.constant
+        lin_dict = qp.objective.linear.to_dict()
+        for idx, val in lin_dict.items():
+            expr += val * g_vars[idx]
+        quad_dict = qp.objective.quadratic.to_dict()
+        for (idx1, idx2), val in quad_dict.items():
+            expr += val * g_vars[idx1] * g_vars[idx2]
+        return expr
+
+    # Add epsilon constraints for all objectives
+    for k, qp in enumerate(qps):
+        expr = get_gurobi_expr(qp, vars)
+        if qp.objective.sense.name == "MINIMIZE":
+            model.addConstr(expr <= lb[k], name=f'eps_{k}')
+        else:
+            model.addConstr(expr >= lb[k], name=f'eps_{k}')
+            
+    # Set the scalarized objective
+    weighted_expr = sum(c[k] * get_gurobi_expr(qp, vars) for k, qp in enumerate(qps))
+    if qps[0].objective.sense.name == "MINIMIZE":
+        model.setObjective(weighted_expr, GRB.MINIMIZE)
+    else:
+        model.setObjective(weighted_expr, GRB.MAXIMIZE)
+        
+    model.optimize()
+    
+    if model.Status == GRB.OPTIMAL:
+        return [var.X for var in vars]
+    else:
+        return None
+
+
 def random_eps_constraint(config, overwrite_results=False):
 
     t1 = time()
 
-    # load problem
-    objective_graphs = config.problem.objective_graphs
-
+    problem_folder = config.problem.problem_folder
     # folder to store results to
     results_folder = config.results_folder
     
@@ -237,23 +293,45 @@ def random_eps_constraint(config, overwrite_results=False):
     
     t2 = time()
 
+    # Check if we are using QPs
+    import os
+    import pickle
+    import fnmatch
+    pkl_files = sorted(fnmatch.filter(os.listdir(problem_folder), 'problem_qp_*.pkl'))
+    
     samples = []
     num_infeasible = 0
-    for i in tqdm(range(config.total_num_samples)):
-        eps_sample = eps_samples[i]  # use this as lower bound for the objectives
-        j = i // config.shots
-        c = objective_weights[j]
-        sample = _mo_maxcut_milp_gurobi(objective_graphs, c, eps_sample)
-        if sample is None:
-            num_infeasible += 1
-            if len(samples) > 0:
-                # if there are already feasible samples, just fill up with the previous one
-                sample = samples[-1]
-            else:
-                # if already the very first sample is infeasible, just take the lower bound as eps constraint
-                sample = _mo_maxcut_milp_gurobi(objective_graphs, c, lower_bounds)
-        
-        samples += [sample]
+    
+    if pkl_files:
+        objective_qps = config.problem.objective_qps
+        for i in tqdm(range(config.total_num_samples)):
+            eps_sample = eps_samples[i]  # use this as lower bound for the objectives
+            j = i // config.shots
+            c = objective_weights[j]
+            sample = _mo_qp_milp_gurobi(objective_qps, c, eps_sample)
+            if sample is None:
+                num_infeasible += 1
+                if len(samples) > 0:
+                    sample = samples[-1]
+                else:
+                    sample = _mo_qp_milp_gurobi(objective_qps, c, lower_bounds)
+                    if sample is None:
+                        sample = [0] * len(objective_qps[0].variables)
+            samples += [sample]
+    else:
+        objective_graphs = config.problem.objective_graphs
+        for i in tqdm(range(config.total_num_samples)):
+            eps_sample = eps_samples[i]  # use this as lower bound for the objectives
+            j = i // config.shots
+            c = objective_weights[j]
+            sample = _mo_maxcut_milp_gurobi(objective_graphs, c, eps_sample)
+            if sample is None:
+                num_infeasible += 1
+                if len(samples) > 0:
+                    sample = samples[-1]
+                else:
+                    sample = _mo_maxcut_milp_gurobi(objective_graphs, c, lower_bounds)
+            samples += [sample]
 
     samples = np.array(samples, dtype='b')
 

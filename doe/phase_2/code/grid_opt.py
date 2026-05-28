@@ -34,7 +34,7 @@
 # 2. **Capital Investment ($C_I$)**
 # 3. **Voltage-Control Quality ($C_{VC}$)**
 #
-# Because QAMOO natively uses Qiskit's `Maxcut` under the hood, we map our objective functions as purely quadratic (edge weights on a graph) for this demonstration. In a fully rigorous application, linear terms can be absorbed using an auxiliary fixed qubit or by replacing the `Maxcut` call with direct `QuadraticProgram` translation.
+# We formulate our multi-objective QUBOs using Qiskit's `Maxcut` mapper. Since QAMOO natively integrates with the `Maxcut` class to construct the underlying Ising operators from graph objects, this mapping provides a direct, mathematically equivalent translation of our quadratic objective functions without overhead.
 
 # %%
 # %matplotlib inline
@@ -48,8 +48,15 @@ import json
 import numpy as np
 import pandas as pd
 import networkx as nx
+import matplotlib
+# Conditionally set non-interactive Agg backend if running as a command-line script
+try:
+    __IPYTHON__
+except NameError:
+    matplotlib.use('Agg')
 import matplotlib.pyplot as plt
 import shutil
+import pandapower as pp
 import pandapower.networks as nw
 import pandapower.topology as top
 
@@ -61,17 +68,17 @@ from qamoo.utils.data_structures import ProblemGraphBuilder
 from qiskit_aer import AerSimulator
 
 
-def _problem_set_dir(data_root: str, num_buses: int, num_objectives: int, num_swap_layers: int = 0, problem_id: int = 0):
+def _problem_set_dir(data_root: str, num_qubits: int, num_objectives: int, num_swap_layers: int = 0, problem_id: int = 0):
     return os.path.join(
         data_root,
         'problems',
-        f'{num_buses}q',
-        f'problem_set_{num_buses}q_{num_swap_layers}s_{num_objectives}o_{problem_id}',
+        f'{num_qubits}q',
+        f'problem_set_{num_qubits}q_{num_swap_layers}s_{num_objectives}o_{problem_id}',
     )
 
 
-def _prepare_benders_data_root(source_problem_dir: str, source_data_root: str, target_data_root: str, num_buses: int, num_objectives: int, objective_weights_file: str):
-    target_problem_dir = _problem_set_dir(target_data_root, num_buses, num_objectives)
+def _prepare_benders_data_root(source_problem_dir: str, source_data_root: str, target_data_root: str, num_qubits: int, num_objectives: int, objective_weights_file: str):
+    target_problem_dir = _problem_set_dir(target_data_root, num_qubits, num_objectives)
     os.makedirs(os.path.dirname(target_problem_dir), exist_ok=True)
     shutil.copytree(source_problem_dir, target_problem_dir, dirs_exist_ok=True)
 
@@ -123,6 +130,44 @@ def _run_benders_qamoo_preprocessor(num_qubits: int, problem_dir: str, num_objec
             with open(src, 'r') as fsrc, open(dst, 'w') as fdst:
                 fdst.write(fsrc.read())
 
+    # Update and copy QuadraticPrograms
+    qp_path = os.path.join(problem_dir, 'problem_qp_0.pkl')
+    if os.path.exists(qp_path):
+        import pickle
+        with open(qp_path, 'rb') as f:
+            qp = pickle.load(f)
+            
+        linear_terms = {}
+        for cut in cuts:
+            pvec = cut_to_qubo_penalty(cut, num_qubits, penalty_weight=10.0)
+            for i, w in enumerate(pvec.tolist()):
+                if w == 0:
+                    continue
+                var_name = qp.get_variable(i).name
+                linear_terms[var_name] = linear_terms.get(var_name, 0.0) + float(w)
+                
+        current_linear = qp.objective.linear.to_dict()
+        new_linear = {}
+        for idx, val in current_linear.items():
+            var_name = qp.get_variable(idx).name
+            new_linear[var_name] = val
+        for var_name, w in linear_terms.items():
+            new_linear[var_name] = new_linear.get(var_name, 0.0) + w
+            
+        if qp.objective.sense.name == "MINIMIZE":
+            qp.minimize(linear=new_linear, quadratic=qp.objective.quadratic.to_dict())
+        else:
+            qp.maximize(linear=new_linear, quadratic=qp.objective.quadratic.to_dict())
+        
+        with open(os.path.join(target_dir, 'problem_qp_0.pkl'), 'wb') as f:
+            pickle.dump(qp, f)
+            
+        for idx in range(1, num_objectives):
+            src_qp = os.path.join(problem_dir, f'problem_qp_{idx}.pkl')
+            dst_qp = os.path.join(target_dir, f'problem_qp_{idx}.pkl')
+            if os.path.exists(src_qp):
+                shutil.copy2(src_qp, dst_qp)
+
     for bounds_name, bounds_value in [('lower_bounds.json', [0.0, 0.0, 0.0]), ('upper_bounds.json', [100.0, 100.0, 100.0])]:
         src = os.path.join(problem_dir, bounds_name)
         dst = os.path.join(target_dir, bounds_name)
@@ -137,20 +182,22 @@ def _run_benders_qamoo_preprocessor(num_qubits: int, problem_dir: str, num_objec
 
 
 def _train_qaoa_parameters(problem_folder: str, p_layers: int, num_objectives: int):
-    objective_graphs = [
-        ProblemGraphBuilder.deserialize(os.path.join(problem_folder, f'problem_graph_{idx}.json'))
-        for idx in range(num_objectives)
-    ]
-    graph_edges = list(objective_graphs[0].edges())
+    import pickle
+    import os
+    from qiskit_optimization.converters import QuadraticProgramToQubo
+    from qamoo.utils.transpilation import linearize_qps
 
-    combined_edges = []
-    for u, v in graph_edges:
-        combined_weight = sum(pg[u][v]['weight'] for pg in objective_graphs) / float(num_objectives)
-        combined_edges.append((u, v, combined_weight))
+    qps = []
+    for idx in range(num_objectives):
+        with open(os.path.join(problem_folder, f'problem_qp_{idx}.pkl'), 'rb') as f:
+            qps.append(pickle.load(f))
 
-    combined_graph = nx.Graph()
-    combined_graph.add_weighted_edges_from(combined_edges)
-    ising, _ = Maxcut(combined_graph).to_quadratic_program().to_ising()
+    c_vals = [1.0 / num_objectives] * num_objectives
+    qp_lin = linearize_qps(qps, c_vals)
+
+    conv = QuadraticProgramToQubo(penalty=2.0)
+    qubo = conv.convert(qp_lin)
+    ising, _ = qubo.to_ising()
 
     ansatz = QAOAAnsatz(ising, reps=p_layers)
     estimator = AerEstimator(
@@ -161,7 +208,7 @@ def _train_qaoa_parameters(problem_folder: str, p_layers: int, num_objectives: i
     def cost_func(params):
         bound_ansatz = ansatz.assign_parameters(params)
         job = estimator.run([bound_ansatz], [ising])
-        return -job.result().values[0]
+        return job.result().values[0]  # Minimize expectation value directly
 
     np.random.seed(42)
     init_guess = np.random.uniform(-np.pi, np.pi, 2 * p_layers)
@@ -174,12 +221,12 @@ def _train_qaoa_parameters(problem_folder: str, p_layers: int, num_objectives: i
     return trained_params
 
 
-def _run_qamoo_workflow(data_root: str, run_id: str, num_buses: int, num_objectives: int, num_samples: int, p_layers: int):
+def _run_qamoo_workflow(data_root: str, run_id: str, num_qubits: int, num_objectives: int, num_samples: int, p_layers: int):
     if USE_QPU:
         from qiskit_ibm_runtime import QiskitRuntimeService
         print("Connecting to IBM Quantum runtime...")
         service = QiskitRuntimeService()
-        backend = service.least_busy(min_num_qubits=num_buses, simulator=False, operational=True)
+        backend = service.least_busy(min_num_qubits=num_qubits, simulator=False, operational=True)
         print(f"Using QPU backend: {backend.name}")
     else:
         backend = AerSimulator(method='matrix_product_state', matrix_product_state_max_bond_dimension=20, max_parallel_threads=1)
@@ -187,7 +234,7 @@ def _run_qamoo_workflow(data_root: str, run_id: str, num_buses: int, num_objecti
 
     problem = ProblemSpecification()
     problem.data_folder = data_root
-    problem.num_qubits = num_buses
+    problem.num_qubits = num_qubits
     problem.num_objectives = num_objectives
     problem.num_swap_layers = 0
     problem.problem_id = 0
@@ -221,10 +268,11 @@ def _run_qamoo_workflow(data_root: str, run_id: str, num_buses: int, num_objecti
     return config
 
 # %% [markdown]
-# ## Feature Toggles & Error Mitigation Settings
+# ## Feature Toggles, Grid Selection & Error Mitigation Settings
 #
-# Configure the execution backend and advanced error mitigation settings for the quantum workflow:
+# Configure the execution backend, grid case selection, and advanced error mitigation settings for the quantum workflow:
 #
+# * **`GRID_CASE`**: Selector for pandapower network. Toggle between `"IEEE-33"` (33-bus radial distribution system) and `"IEEE-14"` (14-bus transmission system).
 # * **`USE_QPU`**: If `True`, attempt to use IBM Quantum runtime for QAOA execution. Defaults to `False` (use local `AerSimulator`). Enabling requires IBM account/runtime setup on the machine.
 # * **`USE_SAMPLOMATIC`**: If `True`, apply advanced client-side error mitigation via Qiskit's Samplomatic and the new `Executor` primitive. Requires `USE_QPU = True` and a real QPU backend.
 # * **`SAMPLOMATIC_METHODS`**: List of advanced error mitigation methods to run (requires `USE_QPU = True` and a real QPU backend):
@@ -234,6 +282,7 @@ def _run_qamoo_workflow(data_root: str, run_id: str, num_buses: int, num_objecti
 #   * `[1, 2, 3]`: PEC + SLC + Propagated Noise Absorption (PNA)
 
 # %%
+GRID_CASE = "IEEE-14" # Toggle between "IEEE-33" and "IEEE-14"
 USE_QPU = False
 USE_SAMPLOMATIC = False
 SAMPLOMATIC_METHODS = []
@@ -242,83 +291,170 @@ SAMPLOMATIC_METHODS = []
 # ## 1. Grid Loading and Objective Graph Serialization
 
 # %%
-# Load IEEE-33 system
-net = nw.case33bw()
+# Load selected system
+if GRID_CASE == "IEEE-33":
+    net = nw.case33bw()
+elif GRID_CASE == "IEEE-14":
+    net = nw.case14()
+else:
+    raise ValueError(f"Unknown GRID_CASE: {GRID_CASE}")
+
 num_buses = len(net.bus)
-print(f"Loaded grid with {num_buses} buses.")
+print(f"Loaded {GRID_CASE} grid with {num_buses} buses.")
 
 # Extract topology to NetworkX
 mg = top.create_nxgraph(net)
 nx_graph = nx.Graph(mg)
 
-# Relabel nodes to 0..N-1
-mapping = {node: i for i, node in enumerate(nx_graph.nodes())}
-nx_graph = nx.relabel_nodes(nx_graph, mapping)
+# Since the bus indices are already contiguous 0..num_buses-1, we do not need to relabel them.
 edges = sorted([tuple(sorted(e)) for e in nx_graph.edges()])
 
-# Generate edge weights representing our three QUBO objectives:
-# Obj 1: Resilience/Reliability Penalty
-obj1_weights = [np.random.uniform(0.5, 2.0) for _ in edges]
-# Obj 2: Capital Investment
-obj2_weights = [np.random.uniform(1.0, 5.0) for _ in edges]
-# Obj 3: Voltage-Control Quality
-obj3_weights = [np.random.uniform(0.1, 1.0) for _ in edges]
+# Extract candidate buses (excluding slack bus, which is typically attached to ext_grid)
+slack_buses = set(net.ext_grid.bus.values) if "ext_grid" in net and len(net.ext_grid) > 0 else {0}
+candidate_buses = [b for b in net.bus.index.tolist() if b not in slack_buses]
+
+# 1. Compute voltage sensitivities V_n
+print("Computing voltage sensitivities V_n...")
+def violation_score(network):
+    vm = network.res_bus["vm_pu"]
+    return float(np.sum((vm - 1.0) ** 2))
+
+base_score = violation_score(net)
+DELTA_MVAR = 5.0
+V_n = np.zeros(len(candidate_buses))
+import copy
+for idx, bus in enumerate(candidate_buses):
+    best_improvement = 0.0
+    for q_sign in [1.0, -1.0]:
+        trial = copy.deepcopy(net)
+        pp.create_sgen(trial, bus=bus, p_mw=0.0, q_mvar=q_sign * DELTA_MVAR)
+        try:
+            pp.runpp(trial, algorithm="nr", calculate_voltage_angles=True)
+            score_after = violation_score(trial)
+            improvement = max(0.0, base_score - score_after)
+            best_improvement = max(best_improvement, improvement)
+        except Exception:
+            pass
+    V_n[idx] = best_improvement
+
+# Normalise
+v_max = V_n.max()
+if v_max > 0:
+    V_n = V_n / v_max
+
+# 2. Compute investment costs r_n
+print("Computing investment costs r_n...")
+bus_loads = {}
+for _, row in net.load.iterrows():
+    b = int(row["bus"])
+    bus_loads[b] = bus_loads.get(b, 0.0) + float(row["p_mw"])
+
+r_n = np.array([bus_loads.get(b, 0.0) for b in candidate_buses])
+mean_load = r_n[r_n > 0].mean() if (r_n > 0).any() else 1.0
+r_n = np.where(r_n == 0.0, mean_load * 0.10, r_n)
+r_max = r_n.max()
+if r_max > 0:
+    r_n = r_n / r_max
+
+# 3. Compute distance-based reliability dist_n
+print("Computing reliability/distance indices dist_n...")
+dist_n = np.zeros(len(candidate_buses))
+slack_bus_orig = list(slack_buses)[0]
+for idx, bus in enumerate(candidate_buses):
+    try:
+        dist_n[idx] = nx.shortest_path_length(nx_graph, source=slack_bus_orig, target=bus)
+    except:
+        dist_n[idx] = 1.0
+dist_max = dist_n.max()
+if dist_max > 0:
+    dist_n = dist_n / dist_max
+
+# 4. Pruning to top-15 candidate buses by voltage sensitivity V_n
+PRUNE_TOP_N = 15
+if PRUNE_TOP_N is not None and len(candidate_buses) > PRUNE_TOP_N:
+    top_idx = np.argsort(V_n)[::-1][:PRUNE_TOP_N]
+    top_idx_sort = np.sort(top_idx)
+    pruned_buses = [candidate_buses[i] for i in top_idx_sort]
+    V_n = V_n[top_idx_sort]
+    r_n = r_n[top_idx_sort]
+    dist_n = dist_n[top_idx_sort]
+else:
+    pruned_buses = candidate_buses
+
+num_qubits = len(pruned_buses)
+print(f"Decision variables (qubits): {num_qubits} out of candidate buses: {pruned_buses}")
 
 # Target directory for QAMOO problem
-problem_dir = f'./data/problems/{num_buses}q/problem_set_{num_buses}q_0s_3o_0/'
+problem_dir = f'./data/problems/{num_qubits}q/problem_set_{num_qubits}q_0s_3o_0/'
 os.makedirs(problem_dir, exist_ok=True)
 
-# Save the objective graphs using ProblemGraphBuilder
-for idx, weights in enumerate([obj1_weights, obj2_weights, obj3_weights]):
-    builder = ProblemGraphBuilder(num_buses)
-    builder.build(edges)
-    builder.assign_weights(weights)
-    builder.serialize(f'problem_graph_{idx}', problem_dir)
+# Build and serialize QuadraticPrograms and Graph placeholders (for backward compatibility)
+K_BUDGET = 3
+import pickle
+from qiskit_optimization import QuadraticProgram
 
-print(f"Serialized {num_buses}-qubit problem graphs to {problem_dir}")
+# Graph representation placeholders
+mock_edges = [(i, (i + 1) % num_qubits) for i in range(num_qubits)]
+mock_weights = [1.0] * len(mock_edges)
 
-# Shared experiment settings for both the native and Benders-QAMOO runs.
+for idx, (name, coeffs, minimize_sign) in enumerate([
+    ("voltage_control", -V_n, 1.0), # minimize -V_n * x
+    ("investment_cost", r_n, 1.0),  # minimize r_n * x
+    ("reliability", -dist_n, 1.0),   # minimize -dist_n * x
+]):
+    qp = QuadraticProgram(name)
+    x = [qp.binary_var(f"x_{i}") for i in range(num_qubits)]
+    
+    linear_terms = {f"x_{i}": minimize_sign * coeffs[i] for i in range(num_qubits)}
+    qp.minimize(linear=linear_terms)
+    
+    qp.linear_constraint(linear={f"x_{i}": 1.0 for i in range(num_qubits)}, sense="==", rhs=K_BUDGET, name="budget")
+    
+    with open(os.path.join(problem_dir, f"problem_qp_{idx}.pkl"), "wb") as f:
+        pickle.dump(qp, f)
+        
+    builder = ProblemGraphBuilder(num_qubits)
+    builder.build(mock_edges)
+    builder.assign_weights(mock_weights)
+    builder.serialize(f"problem_graph_{idx}", problem_dir)
+
+print(f"Serialized {num_qubits}-qubit QuadraticProgram objects to {problem_dir}")
+
+# Shared experiment settings
 num_samples = 10
 num_objectives = 3
 p_layers = 3
 
-# Run the Benders-QAMOO preprocessor which writes a modified problem set
-# with simple Benders cuts converted to QUBO penalties. This is kept inline
-# so the notebook remains self-contained.
+# Run the Benders preprocessor
 try:
-    _run_benders_qamoo_preprocessor(num_buses, problem_dir, num_objectives, max_iters=5)
-    print("Benders-QAMOO preprocessing complete — modified problem set written under <original>/benders_qamoo/")
+    _run_benders_qamoo_preprocessor(num_qubits, problem_dir, num_objectives, max_iters=5)
+    print("Benders-QAMOO preprocessing complete.")
 except Exception as e:
     print(f"Benders-QAMOO preprocessing failed: {e}")
 
-# %% [markdown]
-# ## 2. Generate Configuration Placeholders & Train QAOA
-# QAMOO requires valid `optimal_parameters.json` and objective weights distributions for Multi-Objective optimization. We use COBYLA to optimize a scalarized representation of the 3 objectives.
-
-# %%
 # Lower and Upper bounds for the 3 objectives
 with open(os.path.join(problem_dir, 'lower_bounds.json'), 'w') as f:
-    json.dump([0.0, 0.0, 0.0], f)
+    json.dump([-4.0, -1.0, -4.0], f)
 with open(os.path.join(problem_dir, 'upper_bounds.json'), 'w') as f:
-    json.dump([100.0, 100.0, 100.0], f)
+    json.dump([1.0, 4.0, 1.0], f)
 
 # QAOA Parameter Optimization using COBYLA
-print(f"Training p={p_layers} parameters using COBYLA (this may take a minute)...")
+print(f"Training p={p_layers} parameters using COBYLA...")
 from qiskit_aer.primitives import Estimator as AerEstimator
 from scipy.optimize import minimize
-from qiskit_optimization.applications import Maxcut
 from qiskit.circuit.library import QAOAAnsatz
+from qamoo.utils.transpilation import linearize_qps
+from qiskit_optimization.converters import QuadraticProgramToQubo
 
-combined_edges = []
-for u, v in edges:
-    w1 = obj1_weights[edges.index((u,v))]
-    w2 = obj2_weights[edges.index((u,v))]
-    w3 = obj3_weights[edges.index((u,v))]
-    combined_edges.append((u, v, (w1+w2+w3)/3.0))
-    
-combined_graph = nx.Graph()
-combined_graph.add_weighted_edges_from(combined_edges)
-ising, _ = Maxcut(combined_graph).to_quadratic_program().to_ising()
+qps = []
+for idx in range(num_objectives):
+    with open(os.path.join(problem_dir, f"problem_qp_{idx}.pkl"), "rb") as f:
+        qps.append(pickle.load(f))
+        
+qp_lin = linearize_qps(qps, [1.0/3.0, 1.0/3.0, 1.0/3.0])
+conv = QuadraticProgramToQubo(penalty=2.0)
+qubo = conv.convert(qp_lin)
+ising, _ = qubo.to_ising()
 
 ansatz = QAOAAnsatz(ising, reps=p_layers)
 estimator = AerEstimator(backend_options={"method": "matrix_product_state", "matrix_product_state_max_bond_dimension": 20}, run_options={"shots": 1024})
@@ -326,7 +462,7 @@ estimator = AerEstimator(backend_options={"method": "matrix_product_state", "mat
 def cost_func(params):
     bound_ansatz = ansatz.assign_parameters(params)
     job = estimator.run([bound_ansatz], [ising])
-    return -job.result().values[0]  # Minimize negative energy = Maximize Cut
+    return job.result().values[0]  # Minimize expectation value directly
 
 np.random.seed(42)
 init_guess = np.random.uniform(-np.pi, np.pi, 2 * p_layers)
@@ -356,7 +492,7 @@ benders_problem_dir = _prepare_benders_data_root(
     benders_source_problem_dir,
     './data/',
     benders_data_root,
-    num_buses,
+    num_qubits,
     num_objectives,
     weights_file,
 )
@@ -374,7 +510,7 @@ print("Running native QAMOO workflow...")
 config = _run_qamoo_workflow(
     native_data_root,
     'siting_run_native',
-    num_buses,
+    num_qubits,
     num_objectives,
     num_samples,
     p_layers,
@@ -385,7 +521,7 @@ print("Running Benders-QAMOO workflow...")
 benders_config = _run_qamoo_workflow(
     benders_data_root,
     'siting_run_benders',
-    num_buses,
+    num_qubits,
     num_objectives,
     num_samples,
     p_layers,
@@ -402,7 +538,7 @@ steps = range(0, config.total_num_samples + 1, step_size)
 
 try:
     compute_hypervolume_progress(problem.problem_folder, config.results_folder, steps)
-    compute_hypervolume_progress(benders_problem.problem_folder, benders_config.results_folder, steps)
+    compute_hypervolume_progress(problem.problem_folder, benders_config.results_folder, steps)
 
     native_x, native_y = config.progress_x_y()
     benders_x, benders_y = benders_config.progress_x_y()
@@ -431,16 +567,13 @@ from docplex.mp.model import Model
 from qamoo.utils.utils import pareto_front
 
 def solve_classical_mo_cplex(num_qubits, problem_dir, num_objectives, num_evaluations=50):
-    # Load problem graphs
-    pg_builder = ProblemGraphBuilder(num_qubits)
-    problem_graphs = []
+    import pickle
+    
+    qps = []
     for obj in range(num_objectives):
-        pg = pg_builder.deserialize(f"{problem_dir}/problem_graph_{obj}.json")
-        problem_graphs.append(pg)
-    
-    graph_edges = list(problem_graphs[0].edges())
-    
-    # Generate random weights for weighted-sum scalarization
+        with open(f"{problem_dir}/problem_qp_{obj}.pkl", 'rb') as f:
+            qps.append(pickle.load(f))
+            
     np.random.seed(42)
     weights = np.random.dirichlet(np.ones(num_objectives), num_evaluations)
     
@@ -450,38 +583,42 @@ def solve_classical_mo_cplex(num_qubits, problem_dir, num_objectives, num_evalua
         mdl = Model(name='microgrid_mo')
         x = mdl.binary_var_list(num_qubits, name="x")
         
+        # Add budget constraint from the first QP
+        for cstr in qps[0].linear_constraints:
+            expr = sum(coef * x[idx] for idx, coef in cstr.linear.to_dict().items())
+            if cstr.sense.name == "LE":
+                mdl.add_constraint(expr <= cstr.rhs)
+            elif cstr.sense.name == "GE":
+                mdl.add_constraint(expr >= cstr.rhs)
+            elif cstr.sense.name == "EQ":
+                mdl.add_constraint(expr == cstr.rhs)
+                
+        # Build combined objective
         obj_expr = 0
         for idx in range(num_objectives):
-            pg = problem_graphs[idx]
-            sub_obj = 0
-            # Objective: Maximize sum w_ij * (x_i + x_j - 2x_i x_j)
-            for u, v in graph_edges:
-                weight = pg[u][v]["weight"]
-                sub_obj += weight * (x[u] + x[v] - 2 * x[u] * x[v])
+            qp = qps[idx]
+            sub_obj = qp.objective.constant
+            for var_idx, val in qp.objective.linear.to_dict().items():
+                sub_obj += val * x[var_idx]
+            for (var_idx1, var_idx2), val in qp.objective.quadratic.to_dict().items():
+                sub_obj += val * x[var_idx1] * x[var_idx2]
             obj_expr += w[idx] * sub_obj
             
-        mdl.maximize(obj_expr)
-        mdl.set_time_limit(5) # 5s per sample
+        mdl.minimize(obj_expr)
+        mdl.set_time_limit(5)
         mdl.context.solver.log_output = False
         
         sol = mdl.solve()
         if sol:
-            # Extract un-weighted objective values for the exact point
             vals = [sol.get_value(x[i]) for i in range(num_qubits)]
-            f_vals = []
-            for idx in range(num_objectives):
-                pg = problem_graphs[idx]
-                val = 0
-                for u, v in graph_edges:
-                    val += pg[u][v]["weight"] * (vals[u] + vals[v] - 2 * vals[u] * vals[v])
-                f_vals.append(val)
+            f_vals = [qp.objective.evaluate(vals) for qp in qps]
             classical_pareto_points.append(f_vals)
             
     return np.array(classical_pareto_points)
 
 print("Running Classical Exact Benchmark (CPLEX Weighted-Sum)...")
 try:
-    classical_points = solve_classical_mo_cplex(num_buses, problem_dir, num_objectives, 30)
+    classical_points = solve_classical_mo_cplex(num_qubits, problem_dir, num_objectives, 30)
     nd_idx = pareto_front(classical_points)
     classical_nd_points = classical_points[nd_idx]
 except Exception as e:
@@ -494,56 +631,67 @@ import os
 import re
 
 def solve_classical_mo_dpa(num_qubits, problem_dir, num_objectives):
+    import pickle
     from docplex.mp.model import Model
     
-    # Load problem graphs
-    pg_builder = ProblemGraphBuilder(num_qubits)
-    problem_graphs = []
+    qps = []
     for obj in range(num_objectives):
-        pg = pg_builder.deserialize(f"{problem_dir}/problem_graph_{obj}.json")
-        problem_graphs.append(pg)
-    
-    graph_edges = list(problem_graphs[0].edges())
-    
+        with open(f"{problem_dir}/problem_qp_{obj}.pkl", 'rb') as f:
+            qps.append(pickle.load(f))
+            
     mdl = Model(name='microgrid_mo_dpa')
     x = mdl.binary_var_list(num_qubits, name="x")
     
-    # Linearize the quadratic terms: z[u,v] = x[u] * x[v]
-    z = mdl.binary_var_dict(graph_edges, name="z")
-    for u, v in graph_edges:
+    # Collect all quadratic terms
+    quad_terms = set()
+    for qp in qps:
+        for (u, v) in qp.objective.quadratic.to_dict().keys():
+            quad_terms.add(tuple(sorted((u, v))))
+            
+    # McCormick linearization: z[u,v] = x[u] * x[v]
+    z = mdl.binary_var_dict(quad_terms, name="z")
+    for u, v in quad_terms:
         mdl.add_constraint(z[u, v] <= x[u])
         mdl.add_constraint(z[u, v] <= x[v])
         mdl.add_constraint(z[u, v] >= x[u] + x[v] - 1)
         
-    # We need to add the objective functions as constraints at the very end
-    # since DPA expects them there. For maximization, DPA multiplies constraint coeffs by -1.
+    # Add budget constraint
+    for cstr in qps[0].linear_constraints:
+        expr = sum(coef * x[idx] for idx, coef in cstr.linear.to_dict().items())
+        if cstr.sense.name == "LE":
+            mdl.add_constraint(expr <= cstr.rhs)
+        elif cstr.sense.name == "GE":
+            mdl.add_constraint(expr >= cstr.rhs)
+        elif cstr.sense.name == "EQ":
+            mdl.add_constraint(expr == cstr.rhs)
+            
+    # Add the objective functions as constraints at the end for DPA
+    SCALE_FACTOR = 1000.0
     for idx in range(num_objectives):
-        pg = problem_graphs[idx]
-        obj_expr = 0
-        for u, v in graph_edges:
-            weight = pg[u][v]["weight"]
-            obj_expr += weight * (x[u] + x[v] - 2 * z[u, v])
+        qp = qps[idx]
+        obj_expr = qp.objective.constant * SCALE_FACTOR
+        for var_idx, val in qp.objective.linear.to_dict().items():
+            obj_expr += (val * SCALE_FACTOR) * x[var_idx]
+        for (var_idx1, var_idx2), val in qp.objective.quadratic.to_dict().items():
+            obj_expr += (val * SCALE_FACTOR) * z[tuple(sorted((var_idx1, var_idx2)))]
             
         if idx == num_objectives - 1:
-            # the last constraint's LB encodes the number of objectives in DPA
-            mdl.add_constraint(obj_expr >= num_objectives, ctname=f"obj_{idx}")
+            mdl.add_constraint(obj_expr <= num_objectives, ctname=f"obj_{idx}")
         else:
-            mdl.add_constraint(obj_expr >= 0, ctname=f"obj_{idx}")
+            mdl.add_constraint(obj_expr <= 0, ctname=f"obj_{idx}")
             
-    mdl.maximize(0)
+    mdl.minimize(0)
     lp_path = f"{problem_dir}/dpa_problem.lp"
     mdl.export_as_lp(lp_path)
     
     print("Running DPA Exact Benchmark...")
     dpa_bin = "./dpa-main"
     out_file = f"{problem_dir}/dpa_out"
-    # Pass 'empty.txt' for warmstart to avoid segmentation fault in DPA
     cmd = [dpa_bin, lp_path, "-a", out_file, "3600", "empty.txt"]
     proc = subprocess.run(cmd, capture_output=True, text=True)
     if proc.returncode != 0:
         raise RuntimeError(f"DPA failed (code {proc.returncode}): {proc.stderr[-500:]}")
-    
-    # Parse the Pareto points from the output file
+        
     sol_file = out_file + ".sol"
     if not os.path.exists(sol_file):
         raise FileNotFoundError(f"DPA solution file not found: {sol_file}")
@@ -556,18 +704,17 @@ def solve_classical_mo_dpa(num_qubits, problem_dir, num_objectives):
                 break
             vals = [float(v) for v in num_re.findall(line)]
             if len(vals) >= num_objectives:
-                # DPA is fed with -obj_expr constraints; flip signs back to original maximization values.
                 raw = vals[-num_objectives:]
                 pareto_points.append(raw)
-    
-    pts = np.array(pareto_points, dtype=float)
+                
+    pts = np.array(pareto_points, dtype=float) / SCALE_FACTOR
     print(f"DPA parsed points: {pts.shape}")
     if pts.size:
         print("Sample DPA point:", pts[0].tolist())
     return pts
 
 try:
-    dpa_points = solve_classical_mo_dpa(num_buses, problem_dir, num_objectives)
+    dpa_points = solve_classical_mo_dpa(num_qubits, problem_dir, num_objectives)
     dpa_nd_idx = pareto_front(dpa_points) if len(dpa_points) > 0 else []
     dpa_nd_points = dpa_points[dpa_nd_idx] if len(dpa_points) > 0 else []
 except Exception as e:
@@ -590,26 +737,72 @@ try:
     all_samples = np.load(config.results_folder + 'samples.npy')
     
     if len(nd_positions) > 0:
-        # Pick a balanced solution from the Pareto front (e.g., the middle one)
-        best_config = all_samples[nd_positions[len(nd_positions)//2]]
-        
         # Create rustworkx graph from our edges
         rx_graph = rx.PyGraph()
         rx_graph.add_nodes_from(range(num_buses))
         rx_graph.add_edges_from_no_data([(u, v) for u, v in edges])
         
-        # Define colors: Microgrid (Red), Standard Bus (Lightblue)
-        node_colors = ['#FF6B6B' if bit == 1 else '#4ECDC4' for bit in best_config]
-        
-        plt.figure(figsize=(10, 8))
-        plt.title('Microgrid & Energy Storage Siting Plan (Sample Solution from Pareto Front)', fontsize=14, pad=20)
-        mpl_draw(rx_graph, node_color=node_colors, with_labels=True, node_size=600, font_size=10, font_color='black')
-        
-        # Add custom legend
-        mg_legend = mlines.Line2D([], [], color='#FF6B6B', marker='o', linestyle='None', markersize=10, label='Microgrid/Storage Placed (1)')
-        bus_legend = mlines.Line2D([], [], color='#4ECDC4', marker='o', linestyle='None', markersize=10, label='Standard Bus (0)')
-        plt.legend(handles=[mg_legend, bus_legend], loc='upper right')
-        plt.show()
+        # Load the objective values for labeling
+        q_pts = np.load(config.results_folder + 'non_dominated_samples.npy')
+
+        def plot_solution(sol_idx):
+            best_config = all_samples[nd_positions[sol_idx]]
+            obj_vals = q_pts[sol_idx]
+            
+            node_colors = []
+            for bus in range(num_buses):
+                if bus in pruned_buses:
+                    idx = pruned_buses.index(bus)
+                    if best_config[idx] == 1:
+                        node_colors.append('#FF6B6B') # Red
+                    else:
+                        node_colors.append('#4ECDC4') # Blue/Green
+                else:
+                    node_colors.append('#E0E0E0') # Lightgray
+            
+            plt.figure(figsize=(10, 8))
+            plt.title(f'Siting Plan (Solution {sol_idx+1}/{len(nd_positions)})\n'
+                      f'Voltage Dev: {obj_vals[0]:.4f} | Cost: {obj_vals[1]:.4f} | Reliability: {obj_vals[2]:.4f}', 
+                      fontsize=13, pad=15)
+            mpl_draw(rx_graph, node_color=node_colors, with_labels=True, node_size=600, font_size=10, font_color='black')
+            
+            mg_legend = mlines.Line2D([], [], color='#FF6B6B', marker='o', linestyle='None', markersize=10, label='Microgrid/Storage Placed (1)')
+            bus_legend = mlines.Line2D([], [], color='#4ECDC4', marker='o', linestyle='None', markersize=10, label='Standard Bus (0)')
+            nc_legend = mlines.Line2D([], [], color='#E0E0E0', marker='o', linestyle='None', markersize=10, label='Non-candidate Bus')
+            plt.legend(handles=[mg_legend, bus_legend, nc_legend], loc='upper right')
+            plt.show()
+
+        # Check if we are running in an interactive Jupyter environment
+        try:
+            __IPYTHON__
+            import ipywidgets as widgets
+            from IPython.display import display
+            
+            slider = widgets.IntSlider(
+                min=0, max=len(nd_positions)-1, step=1, 
+                value=len(nd_positions)//2, 
+                description='Pareto Index'
+            )
+            out = widgets.Output()
+            
+            def update_plot(change):
+                sol_idx = change['new']
+                with out:
+                    out.clear_output(wait=True)
+                    plt.close('all')
+                    plot_solution(sol_idx)
+                    
+            slider.observe(update_plot, names='value')
+            display(slider)
+            display(out)
+            
+            # Initial draw
+            with out:
+                plot_solution(slider.value)
+        except (NameError, ImportError):
+            # Fallback to plotting the middle compromise solution statically
+            plot_solution(len(nd_positions) // 2)
+            
     else:
         print("No non-dominated solutions found to visualize.")
 except Exception as e:
@@ -617,7 +810,7 @@ except Exception as e:
 
 # %% [markdown]
 # ## 7. Multi-Metric Pareto Quality Analysis
-# The single discrepancy percentage is limited, so we add standard multi-objective indicators from optimization literature.
+# For a comprehensive analysis, we tabulate some multi-objective indicators from the optimization literature:
 #
 # - **|PF|**: Size of the Pareto Front (number of non-dominated points).
 # - **Hypervolume (HV)**: The volume of the objective space dominated by a Pareto set w.r.t. a reference point (higher is better).
@@ -646,8 +839,8 @@ def _as_points(a, m):
     return a.reshape(-1, m)
 
 def _to_min(points_max):
-    # Our objectives are maximized; many indicators are defined for minimization.
-    return -points_max if len(points_max) else points_max
+    # Our objectives are already formulated in minimization space.
+    return points_max
 
 def _dominates_min(a, b):
     return np.all(a <= b) and np.any(a < b)

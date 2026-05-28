@@ -7,19 +7,31 @@ import numpy as np
 from qamoo.utils.data_structures import ProblemGraphBuilder
 
 
-def evaluate_sample_objectives(samples, objective_graphs):
+def evaluate_sample_objectives(samples, objectives):
+    if len(objectives) == 0:
+        return np.empty((len(samples), 0))
 
-    # evaluate all objective functions for the given samples
-    n = len(samples[0])
-    Qs = []
-    for i, graph in enumerate(objective_graphs):
-        Q = np.zeros((n, n))
-        for u, v, data in graph.edges(data=True):
-            Q[u, v] = data['weight']
-            Q[v, u] = data['weight']
-        Qs += [Q]
-
-    return _eval_loop(samples.astype('float64'), Qs)
+    import networkx as nx
+    if isinstance(objectives[0], nx.Graph):
+        # evaluate all objective functions for the given samples
+        n = len(samples[0])
+        Qs = []
+        for i, graph in enumerate(objectives):
+            Q = np.zeros((n, n))
+            for u, v, data in graph.edges(data=True):
+                Q[u, v] = data['weight']
+                Q[v, u] = data['weight']
+            Qs += [Q]
+        return _eval_loop(samples.astype('float64'), Qs)
+    else:
+        n_samples = len(samples)
+        m_objectives = len(objectives)
+        f_values = np.zeros((n_samples, m_objectives))
+        for i in range(n_samples):
+            x = samples[i]
+            for k in range(m_objectives):
+                f_values[i, k] = objectives[k].objective.evaluate(x)
+        return f_values
 
 
 # speed-up objective evaluation using numba
@@ -64,14 +76,22 @@ def compute_hypervolume_progress(problem_folder, results_folder, steps):
         lower_bounds = json.load(f)
     lower_bounds = np.array(lower_bounds)
     
-    # load objective graphs
-    objective_graphs = [ProblemGraphBuilder.deserialize(problem_folder + g_f) 
-                        for g_f in sorted(fnmatch.filter(os.listdir(problem_folder), 'problem_graph_*.json'))]
+    # load objective graphs or qps
+    import pickle
+    pkl_files = sorted(fnmatch.filter(os.listdir(problem_folder), 'problem_qp_*.pkl'))
+    if pkl_files:
+        objectives = []
+        for fn in pkl_files:
+            with open(os.path.join(problem_folder, fn), 'rb') as f:
+                objectives.append(pickle.load(f))
+    else:
+        objectives = [ProblemGraphBuilder.deserialize(os.path.join(problem_folder, g_f)) 
+                      for g_f in sorted(fnmatch.filter(os.listdir(problem_folder), 'problem_graph_*.json'))]
     
     # load samples and determine hypervolume
     print('evaluate samples objective... ', end='') 
     samples = np.load(results_folder + 'samples.npy')
-    fvals = evaluate_sample_objectives(samples, objective_graphs)
+    fvals = evaluate_sample_objectives(samples, objectives)
     print('done.')
     
     # initialize non-dominated samples and progress

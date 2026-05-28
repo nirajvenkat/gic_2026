@@ -211,6 +211,44 @@ def parameterized_circuit_from_connectivity(connectivity: nx.Graph | SparsePauli
     else:
         TypeError(f'Connectivity must be of type nx.Graph or SparsePauliOp. Got {type(connectivity)} instead.')
 
+    # Check if there are any 1-qubit terms in empty_ising
+    has_linear = any(len([idx for idx, v in enumerate(pauli.z) if v]) == 1 for pauli in empty_ising.paulis)
+
+    if has_linear:
+        from qiskit.circuit import ParameterVector, Parameter
+        from qiskit.circuit.library import RXGate, RZGate, RZZGate
+        
+        num_qubits = empty_ising.num_qubits
+        qc = QuantumCircuit(num_qubits)
+        qc.h(range(num_qubits))
+        
+        gamma_vector = ParameterVector("γ", p)
+        beta_vector = ParameterVector("β", p)
+        
+        params_cache = {}
+        def get_param(name):
+            if name not in params_cache:
+                params_cache[name] = Parameter(name)
+            return params_cache[name]
+        
+        for block in range(p):
+            # Apply cost operator
+            for pauli in empty_ising.paulis:
+                indices = [idx for idx, v in enumerate(pauli.z) if v]
+                if len(indices) == 1:
+                    i = indices[0]
+                    qc.rz(gamma_vector[block] * get_param(f"_{i}"), i)
+                elif len(indices) == 2:
+                    i, j = sorted(indices)
+                    qc.rzz(gamma_vector[block] * get_param(f"_{i}_{j}"), i, j)
+            
+            # Apply mixer operator
+            for i in range(num_qubits):
+                qc.rx(2 * beta_vector[block], i)
+                
+        qc.measure_all()
+        return qc
+
     swap_layers = get_swap_layers(coupling_map.get_edges(), num_swap_layers)
     swap_strategy = SwapStrategy(coupling_map, swap_layers)
 
@@ -220,25 +258,59 @@ def parameterized_circuit_from_connectivity(connectivity: nx.Graph | SparsePauli
 
 
 def get_parameter_dict_from_circuit(circuit: QuantumCircuit) -> dict[Parameter, list[int]]:
-    """Returns the parameter dictionary of a circuit in form {Parameter: [q0, q1]},
+    """Returns the parameter dictionary of a circuit in form {Parameter: [q0, q1]} or {Parameter: [q0]},
     where q0 and q1 are the virtual qubits the parametrized gates act on. The dictionary is sorted in increasing qubit
     indices.
-    Requires the circuit to have parametrized gates with unique name identifiers of the form '*qi_qj'."""
-    parameter_dict = {}  # {Parameter: [int, int]}
+    Requires the circuit to have parametrized gates with unique name identifiers of the form '_qi_qj' or '_qi'."""
+    parameter_dict = {}  # {Parameter: list[int]}
     for param in circuit.parameters:
         if not (param.name.startswith("β") or param.name.startswith("γ")):
             name = param.name[1:]  # removing the first underscore
             qubits = name.split("_", 1)
-            q0, q1 = int(qubits[0]), int(qubits[1])
-            parameter_dict[param] = [q0, q1]
+            if len(qubits) == 2:
+                q0, q1 = int(qubits[0]), int(qubits[1])
+                parameter_dict[param] = [q0, q1]
+            elif len(qubits) == 1:
+                q0 = int(qubits[0])
+                parameter_dict[param] = [q0]
     parameter_dict = {k: v for k, v in sorted(parameter_dict.items(), key=lambda item: sorted(item[1]))}
     return parameter_dict
 
 
-def get_coeff_dict_from_ising(ising: SparsePauliOp) -> dict[tuple[int, int], float]:
+def get_coeff_dict_from_ising(ising: SparsePauliOp) -> dict[tuple[int, ...], float]:
     coeff_dict = {}
     for p, coeff in zip(ising.paulis, ising.coeffs):
         q_term = tuple(sorted(idx for idx, v in enumerate(p.z) if v))
-        if len(q_term) == 2:
+        if len(q_term) == 2 or len(q_term) == 1:
             coeff_dict[q_term] = 2 * coeff
     return coeff_dict
+
+
+def linearize_qps(qps: list, c_values: list[float]):
+    import copy
+    assert len(qps) == len(c_values)
+    qp_lin = copy.deepcopy(qps[0])
+    constant = 0.0
+    linear = {}
+    quadratic = {}
+    
+    for qp, c in zip(qps, c_values):
+        constant += c * qp.objective.constant
+        
+        lin_dict = qp.objective.linear.to_dict()
+        for idx, val in lin_dict.items():
+            var_name = qp.get_variable(idx).name
+            linear[var_name] = linear.get(var_name, 0.0) + c * val
+            
+        quad_dict = qp.objective.quadratic.to_dict()
+        for (idx1, idx2), val in quad_dict.items():
+            var_name1 = qp.get_variable(idx1).name
+            var_name2 = qp.get_variable(idx2).name
+            quadratic[(var_name1, var_name2)] = quadratic.get((var_name1, var_name2), 0.0) + c * val
+            
+    if qps[0].objective.sense.name == "MINIMIZE":
+        qp_lin.minimize(constant=constant, linear=linear, quadratic=quadratic)
+    else:
+        qp_lin.maximize(constant=constant, linear=linear, quadratic=quadratic)
+        
+    return qp_lin

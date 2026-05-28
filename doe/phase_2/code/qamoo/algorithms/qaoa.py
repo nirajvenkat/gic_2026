@@ -45,33 +45,52 @@ def prepare_qaoa_circuits(config: QAOAConfig, backend, overwrite_results=False):
 
     p = config.p
 
-    objective_graphs = [
-        ProblemGraphBuilder.deserialize(
-            problem_folder + f'problem_graph_{idx}.json')
-        for idx in range(num_objectives)
-    ]
+    # Load QuadraticPrograms
+    objective_qps = problem.objective_qps
 
+    from qiskit_optimization.converters import QuadraticProgramToQubo
+    from qamoo.utils.transpilation import linearize_qps
+    
+    # We use a standard soft-penalty lambda weight (e.g. LAMBDA = 2.0 or from problem specs if we want, or default)
+    # Let's use 2.0 as penalty since it matches both the paper and the IEEE-33 runtime.
+    conv = QuadraticProgramToQubo(penalty=2.0)
+    
     objective_weights = config.objective_weights
-    linearized_graphs = [linearize_graphs(objective_graphs, l) for l in objective_weights]
-    isings = (Maxcut(g).to_quadratic_program().to_ising()[0] for g in linearized_graphs)
-    coeff_dicts = [get_coeff_dict_from_ising(i) for i in isings]  # dict[tuple[int, int], float]
+    isings = []
+    for l in objective_weights:
+        qp_lin = linearize_qps(objective_qps, l)
+        qubo = conv.convert(qp_lin)
+        ising, _ = qubo.to_ising()
+        isings.append(ising)
+        
+    coeff_dicts = [get_coeff_dict_from_ising(i) for i in isings]  # dict[tuple[int, ...], float]
 
     if num_swaps > 0:
-        coupling_map_edges = objective_graphs[0].graph['coupling_map_edges']
+        # Fallback to coupling map from graphs if available
+        try:
+            objective_graphs = problem.objective_graphs
+            coupling_map_edges = objective_graphs[0].graph['coupling_map_edges']
+        except:
+            coupling_map_edges = [(i, i+1) for i in range(problem.num_qubits - 1)]
     else:
-        #coupling_map_edges = linearized_graphs[0].edges
-        coupling_map_edges = objective_graphs[0].edges
+        # Check if graphs exist, otherwise create a simple line coupling map
+        try:
+            objective_graphs = problem.objective_graphs
+            coupling_map_edges = objective_graphs[0].edges
+        except:
+            coupling_map_edges = [(i, i+1) for i in range(problem.num_qubits - 1)]
+            
     coupling_map = CouplingMap(coupling_map_edges)
     coupling_map.make_symmetric()
 
-    parameterized_circuit = parameterized_circuit_from_connectivity(linearized_graphs[0], coupling_map, p, num_swaps)
+    parameterized_circuit = parameterized_circuit_from_connectivity(isings[0], coupling_map, p, num_swaps)
 
     # save parameter dicts
     pd = get_parameter_dict_from_circuit(parameterized_circuit)  # dict[Parameter, list[int]]
     parameter_dicts = []
     for coeff_dict in coeff_dicts:
-        assert len(pd) == len(coeff_dict)
-        parameter_dict = {param.name: coeff_dict[tuple(sorted(value))] for param, value in
+        # Use .get(..., 0.0) to handle zero-value coefficients gracefully
+        parameter_dict = {param.name: coeff_dict.get(tuple(sorted(value)), 0.0) for param, value in
                           pd.items()}  # dict[Parameter, float]
         parameter_dicts.append(parameter_dict)
 
@@ -94,6 +113,7 @@ def prepare_qaoa_circuits(config: QAOAConfig, backend, overwrite_results=False):
 
     # process circuit
     i_rzz = 0
+    i_rz = 0
     for d in parameterized_circuit.data:
 
         if d.operation.name == 'h':
@@ -117,6 +137,26 @@ def prepare_qaoa_circuits(config: QAOAConfig, backend, overwrite_results=False):
             for i in range(config.num_samples):
                 mapped_param_values[i][theta.name] = np.real(gammas[i_gamma] * parameter_dicts[i][i_problem])
             mapped_qc.data += [CircuitInstruction(RZZGate(theta), d.qubits, d.clbits)]
+
+        elif d.operation.name == 'rz':
+            from qiskit.circuit.library import RZGate
+            params = list(d.operation.params[0].parameters)
+            # Qiskit's parameters property returns an unordered set, so we must explicitly check for the gamma parameter
+            if 'γ' in params[0].name or 'gamma' in params[0].name.lower():
+                gamma_param, prob_param = params[0], params[1]
+            else:
+                gamma_param, prob_param = params[1], params[0]
+                
+            i_problem = prob_param.name  # get Hamiltonian parameter index
+            i_gamma = int(re.search(r'\d+', gamma_param.name).group())  # get gamma index 
+
+            # generate new parameter to replace expression
+            theta = Parameter(fr'$\theta_{{rz_{i_rz}}}$')
+            i_rz += 1
+
+            for i in range(config.num_samples):
+                mapped_param_values[i][theta.name] = np.real(gammas[i_gamma] * parameter_dicts[i][i_problem])
+            mapped_qc.data += [CircuitInstruction(RZGate(theta), d.qubits, d.clbits)]
         
         elif d.operation.name == 'rx':
             params = list(d.operation.params[0].parameters)
