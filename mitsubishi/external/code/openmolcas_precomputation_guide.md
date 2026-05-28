@@ -135,7 +135,7 @@ This will produce:
 In the hybrid quantum-classical GQE pipeline, the transition density matrix is computed quantumly. We only need the **atomic bound-continuum transition integrals** from the One-Center Approximation (OCA) database to project them into our molecular active space.
 
 We have implemented an **automatic database fallback** directly in the loader of [gqe.py](file:///Users/nvenkat/Desktop/Repos/gic_2026/mitsubishi/phase_2/code/gqe.py):
-* If the file `h2o_aes.rassi.h5` does not exist in `datasets/openmolcas/`, the loader will automatically import `auger_oca`, query its atomic integrals database for Oxygen, and generate the required HDF5 file on the fly.
+* If the file `h2o_aes.rassi.h5` does not exist in `data/openmolcas/`, the loader will automatically import `auger_oca`, query its atomic integrals database for Oxygen, and generate the required HDF5 file on the fly.
 
 Alternatively, you can manually run the helper script [prepare_openmolcas_integrals.py](file:///Users/nvenkat/Desktop/Repos/gic_2026/mitsubishi/phase_2/code/prepare_openmolcas_integrals.py) to compile the HDF5 file:
 ```bash
@@ -145,7 +145,7 @@ python3 prepare_openmolcas_integrals.py
 ```
 
 This generates:
-* **GQE input file:** `mitsubishi/phase_2/code/datasets/openmolcas/h2o_aes.rassi.h5`
+* **GQE input file:** `mitsubishi/phase_2/code/data/openmolcas/h2o_aes.rassi.h5`
 
 > [!NOTE]
 > The HDF5 file is populated with 9 continuum wave channels ($L=0, 1, 2$) and maps the Oxygen core and valence atomic orbitals to the PySCF STO-3G basis indexing.

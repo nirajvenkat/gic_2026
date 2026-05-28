@@ -72,17 +72,17 @@ USE_DIT = False
 USE_AVAS = False
 USE_H2O_OPTIMIZATIONS = True
 
-cache_dir = os.path.join(current_file_dir, "datasets", "qsceom")
+cache_dir = os.path.join(current_file_dir, "data", "qsceom")
 cache_suffix = "_avas" if USE_AVAS else ""
 cache_path = os.path.join(cache_dir, f"qsceom_cache{cache_suffix}.pkl")
 has_cache = os.path.exists(cache_path)
-openmolcas_filepath = os.path.abspath(os.path.join(current_file_dir, "datasets", "openmolcas", "h2o_aes.gqe_integrals.h5"))
+openmolcas_filepath = os.path.abspath(os.path.join(current_file_dir, "data", "openmolcas", "h2o_aes.gqe_integrals.h5"))
 
 seq_len = 4
 trial_name = "trial_h2o"
 if USE_AVAS:
     trial_name += "_avas"
-save_dir = os.path.abspath(os.path.join(current_file_dir, "datasets", f"seq_len={seq_len}/{trial_name}"))
+save_dir = os.path.abspath(os.path.join(current_file_dir, "data", f"seq_len={seq_len}/{trial_name}"))
 
 
 # %% [markdown]
@@ -97,7 +97,7 @@ import pubchempy as pcp
 
 def generate_molecule_data(molecule_name="H2", source="qchem", local_dataset_path=None, use_avas=False):
     if local_dataset_path is None:
-        local_dataset_path = os.path.join(get_current_file_dir(), "datasets")
+        local_dataset_path = os.path.join(get_current_file_dir(), "data")
     # Get the time set T
     op_times = np.sort(np.array([-2**k for k in range(1, 5)] + [2**k for k in range(1, 5)]) / 160)
 
@@ -390,7 +390,7 @@ import pickle
 # Resolve absolute paths
 current_file_dir = get_current_file_dir()
 
-cache_dir = os.path.join(current_file_dir, "datasets", "qsceom")
+cache_dir = os.path.join(current_file_dir, "data", "qsceom")
 use_avas_val = globals().get("USE_AVAS", False)
 cache_suffix = "_avas" if use_avas_val else ""
 cache_path = os.path.join(cache_dir, f"qsceom_cache{cache_suffix}.pkl")
@@ -400,7 +400,7 @@ seq_len = 4
 trial_name = "trial_h2o"
 if use_avas_val:
     trial_name += "_avas"
-save_dir = os.path.abspath(os.path.join(current_file_dir, "datasets", f"seq_len={seq_len}/{trial_name}"))
+save_dir = os.path.abspath(os.path.join(current_file_dir, "data", f"seq_len={seq_len}/{trial_name}"))
 
 if not has_cache:
     # Generate sequence of indices of operators in vocab
@@ -926,7 +926,7 @@ if df_compare_Es is not None:
 if 'has_cache' not in globals():
     import os
     current_file_dir = get_current_file_dir()
-    cache_dir = os.path.join(current_file_dir, "datasets", "qsceom")
+    cache_dir = os.path.join(current_file_dir, "data", "qsceom")
     use_avas_val = globals().get("USE_AVAS", False)
     cache_suffix = "_avas" if use_avas_val else ""
     cache_path = os.path.join(cache_dir, f"qsceom_cache{cache_suffix}.pkl")
@@ -935,7 +935,7 @@ if 'has_cache' not in globals():
     trial_name = "trial_h2o"
     if use_avas_val:
         trial_name += "_avas"
-    save_dir = os.path.abspath(os.path.join(current_file_dir, "datasets", f"seq_len={seq_len}/{trial_name}"))
+    save_dir = os.path.abspath(os.path.join(current_file_dir, "data", f"seq_len={seq_len}/{trial_name}"))
 
 if not has_cache:
     from qsceom import qscEOM
@@ -981,7 +981,7 @@ if not has_cache:
     # Resolve absolute path for pyscf datasets directory
     import os
     current_file_dir = get_current_file_dir()
-    datasets_pyscf_dir = os.path.abspath(os.path.join(current_file_dir, "./datasets/pyscf"))
+    datasets_pyscf_dir = os.path.abspath(os.path.join(current_file_dir, "./data/pyscf"))
     os.makedirs(datasets_pyscf_dir, exist_ok=True)
 
     # 4. Run qscEOM to compute the energies (IP and DIP spaces)
@@ -1085,7 +1085,7 @@ import os
 
 if 'symbols' not in globals():
     current_file_dir = get_current_file_dir()
-    cache_dir = os.path.join(current_file_dir, "datasets", "qsceom")
+    cache_dir = os.path.join(current_file_dir, "data", "qsceom")
     use_avas_val = globals().get("USE_AVAS", False)
     cache_suffix = "_avas" if use_avas_val else ""
     cache_path = os.path.join(cache_dir, f"qsceom_cache{cache_suffix}.pkl")
@@ -1507,7 +1507,7 @@ if USE_H2O_OPTIMIZATIONS and target_molecule == "H2O":
     ]
 
 # Try to load from auger.spectrum.out if it is present
-spec_out_path = os.path.join(current_file_dir, "datasets", "openmolcas", "auger.spectrum.out")
+spec_out_path = os.path.join(current_file_dir, "data", "openmolcas", "auger.spectrum.out")
 if not os.path.exists(spec_out_path):
     spec_out_path = "auger.spectrum.out"
     
@@ -1594,13 +1594,13 @@ def print_precomputed_benchmarks():
     print("State 31 (KE = 478.74 eV): Intensity = 0.000010 (Low-energy tail)")
 
 # Check if the OpenMolcas rassi.h5 file is present
-raw_rassi_path = os.path.join(current_file_dir, "datasets", "openmolcas", "h2o_aes.rassi.h5")
+raw_rassi_path = os.path.join(current_file_dir, "data", "openmolcas", "h2o_aes.rassi.h5")
 
-# Look for any r2TM_ files in the current directory or datasets/openmolcas
+# Look for any r2TM_ files in the current directory or data/openmolcas
 r2tm_files = [f for f in os.listdir(".") if f.startswith("r2TM_")]
-if not r2tm_files and os.path.exists(os.path.join(current_file_dir, "datasets", "openmolcas")):
-    r2tm_files = sorted([f for f in os.listdir(os.path.join(current_file_dir, "datasets", "openmolcas")) if f.startswith("r2TM_")])
-    r2tm_dir = os.path.join(current_file_dir, "datasets", "openmolcas")
+if not r2tm_files and os.path.exists(os.path.join(current_file_dir, "data", "openmolcas")):
+    r2tm_files = sorted([f for f in os.listdir(os.path.join(current_file_dir, "data", "openmolcas")) if f.startswith("r2TM_")])
+    r2tm_dir = os.path.join(current_file_dir, "data", "openmolcas")
 else:
     r2tm_files = sorted(r2tm_files)
     r2tm_dir = "."
