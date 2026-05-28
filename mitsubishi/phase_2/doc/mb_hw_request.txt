@@ -3,27 +3,27 @@ Project: Mitsubishi Chemical / AIST Challenge (Phase 2)
 Objective: Modeling EUV photoabsorption and Auger cascades in 4-iodo-2-methylphenol via a hybrid GQE, q-sc-EOM, and OCA pipeline.
 
 1. PRIMARY MODALITY CHOICE AND WHY
-GPU state-vector simulation (PennyLane/CUDA-Q). Target: transition RDMs for core-ionized and doubly-ionized states. Active space of 16-17 spatial orbitals (32-34 qubits) required for 92 eV EUV cascade (Iodine 4d + valence). Shot-based simulation (QPU/noisy) introduces sampling variance washing out the micro-Hartree (10^-6) off-diagonal signals required to achieve chemical accuracy after OCA tensor contraction. Deterministic simulation is mandatory.
+GPU state-vector simulation (PennyLane/CUDA-Q). Target: transition RDMs for core-ionized and doubly-ionized states to plot a KE spectrum for Auger electrons. Active space of 16-18 spatial orbitals (32-36 qubits) required for 92 eV EUV cascade (Iodine 4d + valence), selected via AVAS and pseudopotential methods to fit within our 36-qubit simulation limit. Deterministic simulation is mandatory to achieve chemical accuracy.
 
 2. BENCHMARKING DETAILS
-Benchmarked exclusively against classical computational chemistry:
-* Validation baseline: K-LL Auger transitions in H2O (11 orbitals / 22 qubits) against FCI via PySCF.
-* Target systems: 61-electron active spaces (IMePh) against Selected Configuration Interaction (SCI) and OpenMolcas atomic integrals.
+Benchmarked against classical chemistry:
+* H2O Auger baseline (7 orbitals / 14 qubits) vs FCI (PySCF).
+* IMePh target CAS(24e, 18o) (36 qubits) or CAS(16e, 16o) (32 qubits) vs Selected Configuration Interaction (SCI) and OpenMolcas.
 
 3. TASKS AND SHOTS
-Shots: 0 (Analytical state-vector expectation values via cudaq.observe()).
-Tasks: 300,000 to 500,000 kernel executions. GQE parameter optimization requires evaluating gradients of thousands of fermionic operators. Subsequent q-sc-EOM matrix construction requires 2,500 off-diagonal amplitudes per molecule.
+Shots: 0 (analytical state-vector expectation values via cudaq.observe()).
+Tasks: 300,000 to 500,000 CUDAQ kernel executions for GQE gradient descent and q-sc-EOM matrix construction (2,500 amplitudes/molecule). Subsequent OCA tensor contractions will utilize cuBLAS library acceleration.
 
 4. GPU ARCHITECTURE JUSTIFICATION
-Requested resource: 8xB200-180GB-SXM6. Next best alternative: 8xH100-80GB-SXM5.
-State-vector memory scales exponentially (2^N * 16 bytes for FP64):
-* 32 Qubits: 68.7 GB
-* 33 Qubits: 137.4 GB
-* 34 Qubits: 274.8 GB
-Why Blackwell is preferred:
-* Single-GPU VRAM: A 33-qubit state vector exceeds H100's 80 GB VRAM, forcing NVLink multi-GPU distribution and communication latency. A B200 (180 GB VRAM) runs this on a single GPU.
-* FP64 Throughput: Mapping OCA integrals to quantum amplitudes requires hardware-level FP64 FMA to prevent double-rounding errors that distort the electron kinetic energy distribution.
-* Node Density: An 8xB200 pod runs up to 35-qubit spaces (549.7 GB VRAM) on a single node or executes multiple 33/34-qubit instances concurrently.
+Requested: 8xB200-180GB-SXM6 (Alternative: 8xH100-80GB-SXM5).
+FP64 state-vector memory: 34 qubits (274.8 GB), 35 qubits (549.7 GB), 36 qubits (1,099.5 GB).
+Blackwell (B200-SXM6) Advantages:
+* Latency: Halves the GPU count for NVLink distribution vs H100 (2 vs 4 GPUs for 34 qubits); SXM6 NVLink-5 bandwidth (1.8 TB/s) minimizes inter-GPU communication bottleneck.
+* Capacity: 8xB200 offers 1,440 GB VRAM, fitting the 36-qubit space (1,099.5 GB) on a single node. 8xH100 is capped at 640 GB and will go out of memory.
+* Precision: SXM6 native FP64 throughput prevents rounding errors in the kinetic energy distributions.
 
 5. EXPECTED HOURS OF USAGE
-120 to 150 hours of GPU compute. Local machines used for 22-qubit prototyping and unit testing. qBraid instances used strictly for 32-34 qubit production runs (approx. 35-40 hours per candidate molecule).
+Requested: 125 GPU hours on qBraid.
+* H2O calibration baseline: ~10-15 hours.
+* Production: Caching molecular integrals and reusing optimization parameters will drastically reduce runtime for subsequent IMePh runs.
+* CAS(24e, 18o) and CAS(16e, 16o) active space trims guarantee all production sweeps complete within the 125-hour allocation. Prototyping will be restricted to local CPU/GPU resources.
