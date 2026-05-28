@@ -1,9 +1,9 @@
 QUANTUM PLATFORM JUSTIFICATION: ENTANGLED TRIO
 Project: Mitsubishi Chemical / AIST Challenge (Phase 2)
-Objective: Modeling EUV photoabsorption and Auger cascades in 4-iodo-2-methylphenol via a hybrid GQE, q-sc-EOM, and OCA pipeline.
+Objective: Modeling EUV photoabsorption and Auger cascades in 4-iodo-2-methylphenol (IMePh) via a hybrid GQE, q-sc-EOM, and OCA pipeline.
 
 1. PRIMARY MODALITY CHOICE AND WHY
-GPU state-vector simulation (PennyLane/CUDA-Q). Target: transition RDMs for core-ionized and doubly-ionized states to plot a KE spectrum for Auger electrons. Active space of 16-18 spatial orbitals (32-36 qubits) required for 92 eV EUV cascade (Iodine 4d + valence), selected via AVAS and pseudopotential methods to fit within our 36-qubit simulation limit. Deterministic simulation is mandatory to achieve chemical accuracy.
+GPU state-vector simulation (PennyLane/CUDA-Q). Target: transition RDMs for core-ionized and doubly-ionized states to plot a KE spectrum for Auger electrons. Active space of 16-18 spatial orbitals (32-36 qubits) required for 92 eV EUV cascade of IMePh (Iodine 4d + valence), selected via AVAS and pseudopotential methods to fit within our 36-qubit simulation limit. Deterministic simulation is mandatory to achieve chemical accuracy.
 
 2. BENCHMARKING DETAILS
 Benchmarked against classical chemistry:
@@ -26,4 +26,4 @@ Blackwell (B200-SXM6) Advantages:
 Requested: 125 GPU hours on qBraid.
 * H2O calibration baseline: ~10-15 hours.
 * Production: Caching molecular integrals and reusing optimization parameters will drastically reduce runtime for subsequent IMePh runs.
-* CAS(24e, 18o) and CAS(16e, 16o) active space trims guarantee all production sweeps complete within the 125-hour allocation. Prototyping will be restricted to local CPU/GPU resources.
+* Trimming active space and using compressed double factorization guarantee all production sweeps complete within the requested time. Prototyping will be restricted to local CPU/GPU resources.
