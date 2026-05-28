@@ -25,7 +25,7 @@
 # ---
 
 # %% [markdown]
-# # Quantum Chemistry for Auger Spectroscopy
+# # Quantum Chemistry for Auger Spectroscopy in EUV Lithography
 # **Team Name:** Entangled Trio
 #
 # This notebook demonstrates the Generative Quantum Eigensolver (GQE) combined with the Quantum Self-Consistent Equation-of-Motion (q-sc-EOM) and One-Center Approximation (OCA) for simulating core-level Auger electron spectra for $\rm H_2O$.
