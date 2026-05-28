@@ -1,0 +1,29 @@
+QUANTUM PLATFORM JUSTIFICATION: ENTANGLED TRIO
+Project: Mitsubishi Chemical / AIST Challenge (Phase 2)
+Objective: Modeling EUV photoabsorption and Auger cascades in 4-iodo-2-methylphenol via a hybrid GQE, q-sc-EOM, and OCA pipeline.
+
+1. PRIMARY MODALITY CHOICE AND WHY
+GPU state-vector simulation (PennyLane/CUDA-Q). Target: transition RDMs for core-ionized and doubly-ionized states. Active space of 16-17 spatial orbitals (32-34 qubits) required for 92 eV EUV cascade (Iodine 4d + valence). Shot-based simulation (QPU/noisy) introduces sampling variance washing out the micro-Hartree (10^-6) off-diagonal signals required to achieve chemical accuracy after OCA tensor contraction. Deterministic simulation is mandatory.
+
+2. BENCHMARKING DETAILS
+Benchmarked exclusively against classical computational chemistry:
+* Validation baseline: K-LL Auger transitions in H2O (11 orbitals / 22 qubits) against FCI via PySCF.
+* Target systems: 61-electron active spaces (IMePh) against Selected Configuration Interaction (SCI) and OpenMolcas atomic integrals.
+
+3. TASKS AND SHOTS
+Shots: 0 (Analytical state-vector expectation values via cudaq.observe()).
+Tasks: 300,000 to 500,000 kernel executions. GQE parameter optimization requires evaluating gradients of thousands of fermionic operators. Subsequent q-sc-EOM matrix construction requires 2,500 off-diagonal amplitudes per molecule.
+
+4. GPU ARCHITECTURE JUSTIFICATION
+Requested resource: 8xB200-180GB-SXM6. Next best alternative: 8xH100-80GB-SXM5.
+State-vector memory scales exponentially (2^N * 16 bytes for FP64):
+* 32 Qubits: 68.7 GB
+* 33 Qubits: 137.4 GB
+* 34 Qubits: 274.8 GB
+Why Blackwell is preferred:
+* Single-GPU VRAM: A 33-qubit state vector exceeds H100's 80 GB VRAM, forcing NVLink multi-GPU distribution and communication latency. A B200 (180 GB VRAM) runs this on a single GPU.
+* FP64 Throughput: Mapping OCA integrals to quantum amplitudes requires hardware-level FP64 FMA to prevent double-rounding errors that distort the electron kinetic energy distribution.
+* Node Density: An 8xB200 pod runs up to 35-qubit spaces (549.7 GB VRAM) on a single node or executes multiple 33/34-qubit instances concurrently.
+
+5. EXPECTED HOURS OF USAGE
+120 to 150 hours of GPU compute. Local machines used for 22-qubit prototyping and unit testing. qBraid instances used strictly for 32-34 qubit production runs (approx. 35-40 hours per candidate molecule).

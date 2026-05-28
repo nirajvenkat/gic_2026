@@ -1,0 +1,25 @@
+QUANTUM PLATFORM JUSTIFICATION: ENTANGLED TRIO
+Project: US Department of Energy OTC Challenge (Phase 2)
+Objective: Executing Benders-QAMOO using the Samplomatic error-mitigation pipeline over Qiskit Executor primitives on physical IBM QPUs.
+
+1. PRIMARY MODALITY CHOICE AND WHY
+Physical QPUs via IBMQ/Qiskit stack. Software layer built on Qiskit Executor primitive. Samplomatic error mitigation requires physical QPU execution to characterize and mitigate gate noise and readout errors in real time. Simulators cannot replicate physical noise or scale to production qubit registers.
+
+2. BENCHMARKING DETAILS
+Benchmarked against classical methods and simulators:
+* Algorithmic & noise verification: 20-30 qubit baselines against noisy density-matrix and tensor-network simulation via Qiskit Aer.
+* Performance comparison: Target production runs against classical MIP solvers (Gurobi, CPLEX) executing classical Benders decomposition.
+
+3. TASKS AND SHOTS
+Shots: 4,000 to 8,000 shots per run. Required for Samplomatic to reconstruct probability distributions with statistical confidence.
+Tasks: 500 to 1,000 iterative QPU jobs. Benders-QAMOO is a hybrid classical-quantum loop: the QPU evaluates the subproblem, Samplomatic mitigates noise, and the classical master solver updates the Benders cuts before the next QPU job.
+
+4. QPU ARCHITECTURE JUSTIFICATION
+Requested resources: 156-qubit Heron-class QPUs (IBM Marrakesh, Pittsburgh, Kingston, Boston, or Fez). Next best alternative: 120-qubit Eagle-class IBM Miami.
+Heron is preferred because:
+* Scale: Benders-QAMOO requires a large qubit register to encode optimization variables and constraints, which Heron's 156-qubit capacity enables.
+* Fidelity: Heron's two-qubit gate fidelity (>99%) and low cross-talk are required for Samplomatic to resolve the signal; on noisier Eagle QPUs, error mitigation fails due to low SNR.
+* Integration: Native Heron support for Qiskit Runtime Executor primitives minimizes queue and execution latency in the hybrid loop.
+
+5. EXPECTED HOURS OF USAGE
+25 to 35 hours QPU runtime. Local simulators used for prototyping, transpilation, and debugging. Physical QPUs reserved strictly for production-scale execution.
