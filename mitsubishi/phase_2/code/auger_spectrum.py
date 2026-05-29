@@ -43,6 +43,7 @@
 # %config InlineBackend.figure_format = 'retina'
 
 import os
+import sys
 import pickle
 
 # Resolve absolute paths
@@ -65,12 +66,14 @@ current_file_dir = get_current_file_dir()
 # * **`USE_DIT`**: If `True`, enable Diffusion Transformer (DIT) for GQE training as an alternative to the auto-regressive GPTnano.
 # * **`USE_AVAS`**: If `True`, apply Active Space Selection (AVAS) to reduce the molecular active space size.
 # * **`USE_H2O_OPTIMIZATIONS`**: If `True`, enable specialized performance optimizations for the $\rm H_2O$ molecule.
+# * **`USE_CDF`**: If `True`, enable Compressed Double Factorization (CDF) to calculate a low-rank Hamiltonian approximation to linear scaling.
 
 # %%
 USE_CUDAQ = False
 USE_DIT = False
 USE_AVAS = False
 USE_H2O_OPTIMIZATIONS = True
+USE_CDF = False
 
 cache_dir = os.path.join(current_file_dir, "data", "qsceom")
 cache_suffix = "_avas" if USE_AVAS else ""
@@ -86,16 +89,95 @@ save_dir = os.path.abspath(os.path.join(current_file_dir, "data", f"seq_len={seq
 
 
 # %% [markdown]
-# ## Molecular Data Generation
+# ## Compressed Double Factorization (CDF) Helper
 #
-# We define a helper function to generate molecular data (Hamiltonian, operator pool, number of qubits/electrons, Hartree-Fock state) either using PennyLane's internal `qchem` dataset downloader or by fetching molecular geometry from PubChem and building the Hamiltonian.
+# We define a helper function (`compute_cdf_hamiltonian`) to perform the Compressed Double Factorization (CDF) tensor reduction pipeline:
+#
+# 1. **Chemist Notation & BLISS Conversion**:
+#    * Converts molecular one-body and two-body integrals into chemist notation ($T_{pq}$ and $V_{pqrs}$).
+#    * Applies the **Block-Invariant Symmetry Shift (BLISS)** to shift eigenvalues and minimize the Hamiltonian's one-norm.
+# 2. **Compressed Factorization**:
+#    * Decomposes the shifted two-body tensor into low-rank core and leaf tensor fragments using a compressed numerical fitting routine with **L2 regularization** via `optax` and `jax`.
+# 3. **One-Body Correction & Error Metrics**:
+#    * Computes a corrected one-body tensor to absorb the two-body Z-gate reduction artifacts.
+#    * Calculates the Frobenius norm reconstruction error ($||V_{\text{shift}} - V'_{\text{shift}}||_F$) to monitor approximation fidelity.
 
 # %%
 import numpy as np
 import pennylane as qml
 import pubchempy as pcp
 
-def generate_molecule_data(molecule_name="H2", source="qchem", local_dataset_path=None, use_avas=False):
+def compute_cdf_hamiltonian(molecule, hamiltonian, use_avas, active_electrons_val, active_orbitals_val, molecule_name):
+    """Computes the Compressed Double Factorization (CDF) representation of the Hamiltonian."""
+    print(f"Constructing CDF Hamiltonian for {molecule_name}...")
+    import optax
+    import jax
+    
+    if use_avas:
+        core_list, active_list = qml.qchem.active_space(
+            molecule.n_electrons, molecule.n_orbitals, 
+            active_electrons=active_electrons_val, active_orbitals=active_orbitals_val
+        )
+        nuc_core, one_body, two_body = qml.qchem.electron_integrals(
+            molecule, core=core_list, active=active_list
+        )()
+    else:
+        nuc_core, one_body, two_body = qml.qchem.electron_integrals(molecule)()
+
+    # Convert to chemist notation
+    two_chem = 0.5 * qml.math.swapaxes(two_body, 1, 3)  # V_pqrs
+    one_chem = one_body - 0.5 * qml.math.einsum("pqss", two_body)  # T_pq
+
+    # Apply Block-Invariant Symmetry Shift (BLISS)
+    core_shift, one_shift, two_shift = qml.qchem.symmetry_shift(
+        nuc_core, one_chem, two_chem, n_elec=active_electrons_val
+    )
+
+    # Compressed Double Factorization (CDF)
+    factors, two_body_cores, two_body_leaves = qml.qchem.factorize(
+        two_shift, tol_factor=1e-2, cholesky=True, compressed=True, regularization="L2"
+    )
+
+    # One-body correction
+    two_core_prime = (qml.math.eye(active_orbitals_val) * two_body_cores.sum(axis=-1)[:, None, :])
+    one_body_extra = qml.math.einsum('tpk,tkk,tqk->pq', two_body_leaves, two_core_prime, two_body_leaves)
+
+    # Factorize corrected one-body tensor
+    one_body_eigvals, one_body_eigvecs = np.linalg.eigh(one_shift + one_body_extra)
+    one_body_cores = np.expand_dims(np.diag(one_body_eigvals), axis=0)
+    one_body_leaves = np.expand_dims(one_body_eigvecs, axis=0)
+
+    # Reconstruction error: ||two_shift - approx_two_shift||_F
+    approx_two_shift = qml.math.einsum(
+        "tpk,tqk,tkl,trl,tsl->pqrs",
+        two_body_leaves, two_body_leaves, two_body_cores, two_body_leaves, two_body_leaves
+    )
+    reconstruction_error = float(qml.math.norm(two_shift - approx_two_shift))
+
+    return {
+        "nuc_constant": float(core_shift[0]),
+        "core_tensors": qml.math.concatenate((one_body_cores, two_body_cores), axis=0),
+        "leaf_tensors": qml.math.concatenate((one_body_leaves, two_body_leaves), axis=0),
+        "reconstruction_error": reconstruction_error,
+        "standard_hamiltonian": hamiltonian,
+        "n_orbitals": active_orbitals_val,
+    }
+
+# %% [markdown]
+# ## Molecular Data Generation (Main Helper)
+#
+# We define a helper function (`generate_molecule_data`) to construct the molecule Hamiltonian, operator pool, Hartree-Fock state, and expected ground state energy. This function supports several execution paths:
+#
+# 1. **Data Source Selection**:
+#    * **`qchem` path**: Loads precomputed molecular coordinates and settings directly from PennyLane's curated chemistry datasets.
+#    * **`pubchem` path**: Dynamically queries the PubChem 3D database (using compound names or CIDs) to fetch geometries for custom target molecules like IMePh.
+# 2. **Active Space Selection (AVAS)**:
+#    * Trims the molecular orbitals down to a defined active space (e.g., active valence electrons and orbitals) to ensure that downstream state-vector simulation remains classically tractable.
+# 3. **CDF Integration**:
+#    * If `use_cdf=True`, delegates the integral transformation and compressed factorization to `compute_cdf_hamiltonian`.
+
+# %%
+def generate_molecule_data(molecule_name="H2", source="qchem", local_dataset_path=None, use_avas=False, use_cdf=False):
     if local_dataset_path is None:
         local_dataset_path = os.path.join(get_current_file_dir(), "data")
     # Get the time set T
@@ -104,6 +186,19 @@ def generate_molecule_data(molecule_name="H2", source="qchem", local_dataset_pat
     # Build operator set P for each molecule
     molecule_data = dict()
     
+    if source == "pubchem":
+        import pickle
+        cache_suffix = "_avas" if use_avas else ""
+        cache_file = os.path.join(local_dataset_path, f"{molecule_name}_pubchem{cache_suffix}.pkl")
+        if os.path.exists(cache_file):
+            print(f"Loading {molecule_name} (pubchem) from local cache: {cache_file}")
+            try:
+                with open(cache_file, "rb") as f:
+                    cached_data = pickle.load(f)
+                return {molecule_name: cached_data}
+            except Exception as e:
+                print(f"Failed to load cache: {e}. Recomputing...")
+
     if source == "qchem":
         import h5py
         from pathlib import Path
@@ -160,10 +255,24 @@ def generate_molecule_data(molecule_name="H2", source="qchem", local_dataset_pat
         
     elif source == "pubchem":
         # Fetch from PubChem
-        compounds = pcp.get_compounds(molecule_name, 'name', record_type='3d')
-        if not compounds or not hasattr(compounds[0].atoms[0], 'x') or compounds[0].atoms[0].x is None:
-            # Fallback to 2D if 3D is not available
-            compounds = pcp.get_compounds(molecule_name, 'name')
+        # Map specific molecules to their CID for robust 3D structure queries
+        cid_map = {
+            "4-iodo-2-methylphenol": 143713,
+            "IMePh": 143713
+        }
+        
+        if molecule_name in cid_map:
+            compounds = pcp.get_compounds(cid_map[molecule_name], 'cid', record_type='3d')
+            if not compounds or not hasattr(compounds[0].atoms[0], 'x') or compounds[0].atoms[0].x is None:
+                compounds = pcp.get_compounds(cid_map[molecule_name], 'cid')
+        elif isinstance(molecule_name, int) or (isinstance(molecule_name, str) and molecule_name.isdigit()):
+            compounds = pcp.get_compounds(int(molecule_name), 'cid', record_type='3d')
+            if not compounds or not hasattr(compounds[0].atoms[0], 'x') or compounds[0].atoms[0].x is None:
+                compounds = pcp.get_compounds(int(molecule_name), 'cid')
+        else:
+            compounds = pcp.get_compounds(molecule_name, 'name', record_type='3d')
+            if not compounds or not hasattr(compounds[0].atoms[0], 'x') or compounds[0].atoms[0].x is None:
+                compounds = pcp.get_compounds(molecule_name, 'name')
             
         c = compounds[0]
         symbols = [atom.element for atom in c.atoms]
@@ -183,7 +292,8 @@ def generate_molecule_data(molecule_name="H2", source="qchem", local_dataset_pat
                 symbols, 
                 coords, 
                 active_electrons=active_electrons, 
-                active_orbitals=active_orbitals
+                active_orbitals=active_orbitals,
+                load_data=True
             )
             hf_state = qml.qchem.hf_state(active_electrons, num_qubits)
             
@@ -194,7 +304,7 @@ def generate_molecule_data(molecule_name="H2", source="qchem", local_dataset_pat
             expected_ground_state_E = float(eigenvalues[0])
         else:
             # Build Hamiltonian and molecule using PennyLane
-            hamiltonian, num_qubits = qml.qchem.molecular_hamiltonian(symbols, coords)
+            hamiltonian, num_qubits = qml.qchem.molecular_hamiltonian(symbols, coords, load_data=True)
             
             # Simple estimation of electrons (assuming neutral molecule)
             electron_map = {'H': 1, 'C': 6, 'N': 7, 'O': 8, 'F': 9, 'I': 53}
@@ -208,6 +318,27 @@ def generate_molecule_data(molecule_name="H2", source="qchem", local_dataset_pat
     single_excs = [qml.SingleExcitation(time, wires=single) for single in singles for time in op_times]
     identity_ops = [qml.exp(qml.I(range(num_qubits)), 1j*time) for time in op_times] # For Identity
     operator_pool = double_excs + single_excs + identity_ops
+
+    if use_cdf:
+        if source == "qchem":
+            molecule = dataset.molecule
+        else:
+            molecule = qml.qchem.Molecule(symbols, coords)
+
+        if use_avas:
+            if USE_H2O_OPTIMIZATIONS and molecule_name == "H2O":
+                active_electrons_val = 8
+                active_orbitals_val = 6
+            else:
+                active_electrons_val = num_electrons
+                active_orbitals_val = num_qubits // 2
+        else:
+            active_electrons_val = molecule.n_electrons
+            active_orbitals_val = molecule.n_orbitals
+
+        hamiltonian = compute_cdf_hamiltonian(
+            molecule, hamiltonian, use_avas, active_electrons_val, active_orbitals_val, molecule_name
+        )
     
     molecule_data[molecule_name] = {
         "op_pool": np.array(operator_pool), 
@@ -221,23 +352,41 @@ def generate_molecule_data(molecule_name="H2", source="qchem", local_dataset_pat
         "active_orbitals": num_qubits // 2
     }
     
+    if source == "pubchem":
+        try:
+            import pickle
+            cache_suffix = "_avas" if use_avas else ""
+            cache_file = os.path.join(local_dataset_path, f"{molecule_name}_pubchem{cache_suffix}.pkl")
+            os.makedirs(os.path.dirname(cache_file), exist_ok=True)
+            print(f"Caching computed {molecule_name} (pubchem) to: {cache_file}")
+            with open(cache_file, "wb") as f:
+                pickle.dump(molecule_data[molecule_name], f)
+        except Exception as e:
+            print(f"Failed to write cache: {e}")
+            
     return molecule_data
 
 
 # %% [markdown]
 # ## Loading and Configuring Molecular Parameters
 #
-# For comparison, we load the dataset for the target molecule (e.g., $H_2O$) via both the offline `qchem` database and `pubchem` to extract the coordinates, Hamiltonian terms, Hartree-Fock reference state, and full operator pool of single and double excitations.
+# For comparison, we load:
+# 1. $\rm H_2O$ via PL datasets (qchem)
+# 2. $\rm H_2O$ from PubChem
+#
+# This allows us to extract and compare coordinates, Hamiltonian terms, Hartree-Fock reference states, and the full operator pools of single and double excitations. Note that we will proceed with choice 1 ($\rm H_2O$ via qchem) for the rest of the notebook.
 
 # %%
 target_molecule = "H2O"
 
 # Helper to safely get the length of hamiltonian terms across PL versions
 def get_hamiltonian_terms_len(h):
+    if isinstance(h, dict) and "core_tensors" in h:
+        return len(h["core_tensors"])  # Returns the number of fragments L (including one-body)
     return len(getattr(h, "ops", getattr(h, "operands", [])))
 
 # 1. Load via qchem
-qchem_molecule_data = generate_molecule_data(target_molecule, source="qchem", use_avas=USE_AVAS)
+qchem_molecule_data = generate_molecule_data(target_molecule, source="qchem", use_avas=USE_AVAS, use_cdf=USE_CDF)
 qchem_data = qchem_molecule_data[target_molecule]
 
 print(f"--- {target_molecule} (qchem) ---")
@@ -247,11 +396,11 @@ print(f"HF State: {qchem_data['hf_state']}")
 print(f"FCI Energy: {qchem_data['expected_ground_state_E']}")
 print(f"Hamiltonian terms: {get_hamiltonian_terms_len(qchem_data['hamiltonian'])}")
 
-# 2. Load via pubchem
-pubchem_molecule_data = generate_molecule_data(target_molecule, source="pubchem", use_avas=USE_AVAS)
+# 2. Load via PubChem
+pubchem_molecule_data = generate_molecule_data(target_molecule, source="pubchem", use_avas=USE_AVAS, use_cdf=USE_CDF)
 pubchem_data = pubchem_molecule_data[target_molecule]
 
-print(f"\n--- {target_molecule} (pubchem) ---")
+print(f"\n--- {target_molecule} (PubChem) ---")
 print(f"Number of Qubits: {pubchem_data['num_qubits']}")
 print(f"Operator Pool Size: {len(pubchem_data['op_pool'])}")
 print(f"HF State: {pubchem_data['hf_state']}")
@@ -264,6 +413,25 @@ init_state = qchem_data["hf_state"]
 hamiltonian = qchem_data["hamiltonian"]
 grd_E = qchem_data["expected_ground_state_E"]
 op_pool_size = len(op_pool)
+
+# %% [markdown]
+# ## Compressed Double Factorization (CDF) Statistics
+#
+# If CDF is enabled, we display details of the factorization fragments, reconstruction error, and compression ratio.
+
+# %%
+if USE_CDF and isinstance(hamiltonian, dict) and "core_tensors" in hamiltonian:
+    n_orbitals = hamiltonian["n_orbitals"]
+    df_upper_bound = n_orbitals ** 2
+    num_two_body_factors = len(hamiltonian["core_tensors"]) - 1
+    reduction_pct = (1.0 - num_two_body_factors / df_upper_bound) * 100.0
+    
+    print("--- Compressed Double Factorization (CDF) Summary ---")
+    print(f"Active orbitals (N): {n_orbitals}")
+    print(f"Double Factorization terms upper bound (N^2): {df_upper_bound}")
+    print(f"Compressed two-body fragments (L): {num_two_body_factors}")
+    print(f"Compression reduction percentage: {reduction_pct:.2f}%")
+    print(f"CDF Hamiltonian reconstruction error (Frobenius norm): {hamiltonian['reconstruction_error']:.2e}")
 
 # %% [markdown]
 # ## Subsequence Energy Evaluation
@@ -296,7 +464,9 @@ if USE_CUDAQ:
                 
         return cudaq_ham
 
-    ham_cudaq = pl_hamiltonian_to_cudaq(hamiltonian)
+    # Resolve standard Hamiltonian for CUDA-Q mapping
+    meas_hamiltonian = hamiltonian["standard_hamiltonian"] if isinstance(hamiltonian, dict) and "standard_hamiltonian" in hamiltonian else hamiltonian
+    ham_cudaq = pl_hamiltonian_to_cudaq(meas_hamiltonian)
 
     # Helper to apply PL ops natively using generators in CUDA-Q
     def apply_pl_op_to_cudaq(kernel, qubits, op):
@@ -347,14 +517,17 @@ if USE_CUDAQ:
 # %%
 dev = qml.device("lightning.qubit", wires=num_qubits)
 
+# Resolve standard Hamiltonian if using CDF representation for stats
+meas_hamiltonian = hamiltonian["standard_hamiltonian"] if isinstance(hamiltonian, dict) and "standard_hamiltonian" in hamiltonian else hamiltonian
+
 @qml.qnode(dev)
 def energy_circuit(gqe_ops):
     # Computes Eq. 1 from Nakaji et al. based on the selected unitary operators
     qml.BasisState(init_state, wires=range(num_qubits)) # Initial state <-- Hartree Fock state
     for op in gqe_ops:
-        qml.Snapshot(measurement=qml.expval(hamiltonian))
+        qml.Snapshot(measurement=qml.expval(meas_hamiltonian))
         qml.apply(op) # Applies each of the unitary operators
-    return qml.expval(hamiltonian)
+    return qml.expval(meas_hamiltonian)
 
 energy_circuit = qml.snapshots(energy_circuit)
 
@@ -1170,7 +1343,7 @@ if file_needs_generation:
     print("Attempting fallback to generate integrals from installed 'auger_oca' database...")
     try:
         import sys
-        sys.path.insert(0, "/Users/nvenkat/Desktop/Repos/OpenMolcas/Tools/AugerOca")
+        sys.path.insert(0, os.path.abspath(os.path.join(get_current_file_dir(), "../../external/code/AugerOca")))
         from auger_oca.oca_integrals import elmij
         
         # Setup directories
@@ -1496,22 +1669,13 @@ spectrum_norm = spectrum / np.max(spectrum) if np.max(spectrum) > 0 else spectru
 
 # Construct classical reference spectrum for overlay
 classical_peaks = []
-if USE_H2O_OPTIMIZATIONS and target_molecule == "H2O":
-    # Fallback to precomputed exact values for H2O if files are missing
-    classical_peaks = [
-        (500.49, 0.001367),
-        (498.27, 0.001299),
-        (492.82, 0.001971),
-        (487.00, 0.000028),
-        (478.74, 0.000010)
-    ]
 
-# Try to load from auger.spectrum.out if it is present
 spec_out_path = os.path.join(current_file_dir, "data", "openmolcas", "auger.spectrum.out")
 if not os.path.exists(spec_out_path):
     spec_out_path = "auger.spectrum.out"
-    
-if os.path.exists(spec_out_path):
+
+# 1. Attempt to load classical peaks from cached spectrum file
+if os.path.exists(spec_out_path) and os.path.getsize(spec_out_path) > 0:
     try:
         loaded_peaks = []
         with open(spec_out_path, "r") as f_spec:
@@ -1519,12 +1683,131 @@ if os.path.exists(spec_out_path):
                 if line.strip() and not line.startswith("#"):
                     parts = line.split()
                     if len(parts) >= 2:
-                        # auger.spectrum.out contains: binding_energy intensity
                         loaded_peaks.append((float(parts[0]), float(parts[1])))
         if loaded_peaks:
             classical_peaks = loaded_peaks
+            print(f"Loaded {len(classical_peaks)} classical peaks from cache: {spec_out_path}")
     except Exception as e:
         print(f"Could not parse classical spectrum file: {e}")
+
+# 2. If cache is empty or missing, compute from RASSI and r2TM_ files in real-time
+if not classical_peaks:
+    raw_rassi_path = os.path.join(current_file_dir, "data", "openmolcas", "h2o_aes.rassi.h5")
+    r2tm_files = [f for f in os.listdir(".") if f.startswith("r2TM_")]
+    if not r2tm_files and os.path.exists(os.path.join(current_file_dir, "data", "openmolcas")):
+        r2tm_files = sorted([f for f in os.listdir(os.path.join(current_file_dir, "data", "openmolcas")) if f.startswith("r2TM_")])
+        r2tm_dir = os.path.join(current_file_dir, "data", "openmolcas")
+    else:
+        r2tm_files = sorted(r2tm_files)
+        r2tm_dir = "."
+
+    if os.path.exists(raw_rassi_path) and r2tm_files:
+        print("\n--- Computing Classical Reference Spectrum in Real-Time ---")
+        temp_rassi_path = os.path.join(r2tm_dir, "h2o_aes.rassi.h5")
+        copied_temp = False
+        if not os.path.exists(temp_rassi_path) or os.path.getsize(temp_rassi_path) != os.path.getsize(raw_rassi_path):
+            shutil.copy2(raw_rassi_path, temp_rassi_path)
+            copied_temp = True
+            
+        orig_cwd = os.getcwd()
+        try:
+            with h5py.File(raw_rassi_path, "r") as f_raw:
+                sfs_energies = np.array(f_raw["SFS_ENERGIES"])
+            E_IP = sfs_energies[0]
+            E_DIPs = sfs_energies[1:]
+            HARTREE_TO_EV = 27.211386245988
+            E_kinetics_ev = (E_IP - E_DIPs) * HARTREE_TO_EV
+            
+            sys.path.insert(0, os.path.abspath(os.path.join(get_current_file_dir(), "../../external/code/AugerOca")))
+            # Monkey patch elmij in auger_oca to resolve gc == OCA_c mismatch bug
+            import auger_oca.oca_integrals
+            import auger_oca.rt2mzz
+            orig_elmij = auger_oca.oca_integrals.elmij
+            def patched_elmij(OCA_atom, OCA_c, c, i, j, l, m):
+                return orig_elmij(OCA_atom, OCA_c, OCA_c, i, j, l, m)
+            auger_oca.oca_integrals.elmij = patched_elmij
+            auger_oca.rt2mzz.elmij = patched_elmij
+            
+            from auger_oca.initi import init2, init3
+            from auger_oca.auger_driver import driver_auger
+            
+            os.chdir(r2tm_dir)
+            computed_peaks = []
+            for f in r2tm_files:
+                parts = f.split("_")
+                if len(parts) >= 3:
+                    try:
+                        state_num = int(parts[2])
+                        state_idx = state_num - 2
+                    except ValueError:
+                        state_idx = 0
+                else:
+                    state_idx = 0
+                    
+                vals = list(init2(f))
+                if USE_H2O_OPTIMIZATIONS and target_molecule == "H2O":
+                    if vals[2][0] == "O 1s":
+                        vals[2][0] = "O1 1s"
+                    
+                hd5_file, basis_id_hd5, element = init3(vals[12], vals[5])
+                
+                driver_auger(
+                    f, False, True, False, True,
+                    vals[0], vals[2], vals[3], vals[4], vals[5],
+                    vals[6], vals[9], vals[12], vals[15], vals[16],
+                    vals[17], vals[18], vals[20], vals[21], vals[8],
+                    vals[22], vals[23], hd5_file, element, basis_id_hd5
+                )
+                
+                output_file = "Auger_OCA." + f + ".out"
+                intensity = 0.0
+                if os.path.exists(output_file):
+                    with open(output_file, "r") as out_f:
+                        for line in out_f:
+                            if "Spectrum: BE(eV) and Intensity from OCA:" in line:
+                                line_parts = line.strip().split()
+                                if len(line_parts) >= 9:
+                                    try:
+                                        intensity = float(line_parts[8])
+                                    except ValueError:
+                                        intensity = 0.0
+                    os.remove(output_file)
+                    
+                ke = E_kinetics_ev[state_idx] if state_idx < len(E_kinetics_ev) else 0.0
+                computed_peaks.append((ke, intensity))
+            
+            if computed_peaks:
+                classical_peaks = computed_peaks
+                # Cache the computed peaks
+                try:
+                    cache_dir = os.path.dirname(spec_out_path)
+                    if cache_dir:
+                        os.makedirs(cache_dir, exist_ok=True)
+                    with open(spec_out_path, "w") as f_spec:
+                        f_spec.write("# Kinetic_Energy_eV Intensity\n")
+                        for ke, intensity in classical_peaks:
+                            f_spec.write(f"{ke:.6f} {intensity:.10f}\n")
+                    print(f"Cached {len(classical_peaks)} computed peaks to: {spec_out_path}")
+                except Exception as e:
+                    print(f"Could not cache computed peaks: {e}")
+                    
+        except Exception as e:
+            print(f"Error computing classical spectrum: {e}")
+        finally:
+            if copied_temp and os.path.exists(temp_rassi_path):
+                os.remove(temp_rassi_path)
+            os.chdir(orig_cwd)
+
+# 3. Fallback to hardcoded peaks if both loading and real-time computation failed
+if not classical_peaks and USE_H2O_OPTIMIZATIONS and target_molecule == "H2O":
+    print("Falling back to hardcoded precomputed exact benchmarks...")
+    classical_peaks = [
+        (500.49, 0.001367),
+        (498.27, 0.001299),
+        (492.82, 0.001971),
+        (487.00, 0.000028),
+        (478.74, 0.000010)
+    ]
         
 # Plot overlay results if classical peaks are available
 df_spectrum_dict = {
@@ -1554,7 +1837,7 @@ if "Classical Reference" in df_spectrum.columns:
     classical_plot = df_spectrum.hvplot.line(
         x="Kinetic Energy (eV)",
         y="Classical Reference",
-        label="Classical Reference",
+        label="OpenMolcas RASSI",
         color="blue",
         line_dash="dashed",
     )
@@ -1574,140 +1857,4 @@ else:
 
 spectrum_fig
 
-# %% [markdown]
-# # Classical Reference Spectrum Printing
-#
-# If the raw OpenMolcas output is present in the repository, we can execute the classical post-processing calculations or print the precomputed benchmark energies and intensities for direct comparison.
-
-# %%
-import os
-import subprocess
-import shutil
-import sys
-
-def print_precomputed_benchmarks():
-    print("\n--- Classical Reference Spectrum (Precomputed Benchmarks) ---")
-    print("State 6  (KE = 500.49 eV): Intensity = 0.001367 (Lone Pair, gas phase experimental ~500 eV)")
-    print("State 7  (KE = 498.27 eV): Intensity = 0.001299 (Lone Pair)")
-    print("State 8  (KE = 492.82 eV): Intensity = 0.001971 (Inner Valence / CVV Peak)")
-    print("State 9  (KE = 487.00 eV): Intensity = 0.000028 (Low-energy shoulder)")
-    print("State 31 (KE = 478.74 eV): Intensity = 0.000010 (Low-energy tail)")
-
-# Check if the OpenMolcas rassi.h5 file is present
-raw_rassi_path = os.path.join(current_file_dir, "data", "openmolcas", "h2o_aes.rassi.h5")
-
-# Look for any r2TM_ files in the current directory or data/openmolcas
-r2tm_files = [f for f in os.listdir(".") if f.startswith("r2TM_")]
-if not r2tm_files and os.path.exists(os.path.join(current_file_dir, "data", "openmolcas")):
-    r2tm_files = sorted([f for f in os.listdir(os.path.join(current_file_dir, "data", "openmolcas")) if f.startswith("r2TM_")])
-    r2tm_dir = os.path.join(current_file_dir, "data", "openmolcas")
-else:
-    r2tm_files = sorted(r2tm_files)
-    r2tm_dir = "."
-
-if os.path.exists(raw_rassi_path) and r2tm_files:
-    print("\n--- Computing and Printing Classical Reference Spectrum ---")
-    
-    # Temporarily copy the raw rassi.h5 to the directory with r2TM_ files
-    temp_rassi_path = os.path.join(r2tm_dir, "h2o_aes.rassi.h5")
-    copied_temp = False
-    if not os.path.exists(temp_rassi_path) or os.path.getsize(temp_rassi_path) != os.path.getsize(raw_rassi_path):
-        shutil.copy2(raw_rassi_path, temp_rassi_path)
-        copied_temp = True
-        
-    orig_cwd = os.getcwd()
-    try:
-        # Load energies from raw RASSI HDF5
-        with h5py.File(raw_rassi_path, "r") as f_raw:
-            sfs_energies = np.array(f_raw["SFS_ENERGIES"])
-        E_IP = sfs_energies[0]
-        E_DIPs = sfs_energies[1:]
-        HARTREE_TO_EV = 27.211386245988
-        E_kinetics_ev = (E_IP - E_DIPs) * HARTREE_TO_EV
-        
-        # Add local AugerOca directory to sys.path to get the fixed version instead of site-packages
-        sys.path.insert(0, "/Users/nvenkat/Desktop/Repos/OpenMolcas/Tools/AugerOca")
-        
-        # Monkey patch elmij in auger_oca to resolve gc == OCA_c mismatch bug
-        import auger_oca.oca_integrals
-        import auger_oca.rt2mzz
-        orig_elmij = auger_oca.oca_integrals.elmij
-        def patched_elmij(OCA_atom, OCA_c, c, i, j, l, m):
-            return orig_elmij(OCA_atom, OCA_c, OCA_c, i, j, l, m)
-        auger_oca.oca_integrals.elmij = patched_elmij
-        auger_oca.rt2mzz.elmij = patched_elmij
-        
-        from auger_oca.initi import init2, init3
-        from auger_oca.auger_driver import driver_auger
-        
-        os.chdir(r2tm_dir)
-        
-        print("\nClassical Reference Spectrum (KE and Intensity from OCA):")
-        print(f"{'State':<10}{'Kinetic Energy (eV)':<25}{'Intensity (a.u.)':<20}")
-        print("-" * 55)
-        
-        for f in r2tm_files:
-            # Parse state index from filename, e.g., r2TM_SDA_002_001 -> state 2 (1st double ionized state, index 0)
-            parts = f.split("_")
-            if len(parts) >= 3:
-                try:
-                    state_num = int(parts[2])
-                    state_idx = state_num - 2
-                except ValueError:
-                    state_idx = 0
-            else:
-                state_idx = 0
-                
-            vals = list(init2(f))
-            # Modify scattering center to match basis labels
-            if USE_H2O_OPTIMIZATIONS and target_molecule == "H2O":
-                if vals[2][0] == "O 1s":
-                    vals[2][0] = "O1 1s"
-                
-            hd5_file, basis_id_hd5, element = init3(vals[12], vals[5])
-            
-            # Execute the classical driver (writes output to Auger_OCA.<f>.out)
-            driver_auger(
-                f, False, True, False, True,
-                vals[0], vals[2], vals[3], vals[4], vals[5],
-                vals[6], vals[9], vals[12], vals[15], vals[16],
-                vals[17], vals[18], vals[20], vals[21], vals[8],
-                vals[22], vals[23], hd5_file, element, basis_id_hd5
-            )
-            
-            # Read output, extract intensity
-            output_file = "Auger_OCA." + f + ".out"
-            intensity = 0.0
-            if os.path.exists(output_file):
-                with open(output_file, "r") as out_f:
-                    for line in out_f:
-                        if "Spectrum: BE(eV) and Intensity from OCA:" in line:
-                            line_parts = line.strip().split()
-                            if len(line_parts) >= 9:
-                                try:
-                                    intensity = float(line_parts[8])
-                                # Python 3 syntax error bug fix if it occurs, but it's just except ValueError
-                                except ValueError:
-                                    intensity = 0.0
-                os.remove(output_file) # Clean up output file
-                
-            ke = E_kinetics_ev[state_idx] if state_idx < len(E_kinetics_ev) else 0.0
-            print(f"State {state_idx+2:<5}{ke:<25.2f}{intensity:<20.6f}")
-            
-    except Exception as e:
-        print(f"Error computing classical spectrum: {e}")
-        # Fallback to precomputed benchmarks if calculation failed
-        if USE_H2O_OPTIMIZATIONS and target_molecule == "H2O":
-            print_precomputed_benchmarks()
-        else:
-            print("\nClassical reference calculations failed and no precomputed benchmarks are configured for this molecule.")
-    finally:
-        if copied_temp and os.path.exists(temp_rassi_path):
-            os.remove(temp_rassi_path)
-        os.chdir(orig_cwd)
-else:
-    # Print the precomputed classical reference peaks for comparison
-    if USE_H2O_OPTIMIZATIONS and target_molecule == "H2O":
-        print_precomputed_benchmarks()
-    else:
-        print("\nNo classical reference data found.")
+# Done
