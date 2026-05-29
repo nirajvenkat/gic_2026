@@ -319,6 +319,8 @@ def violation_score(network):
     vm = network.res_bus["vm_pu"]
     return float(np.sum((vm - 1.0) ** 2))
 
+# Run base power flow to populate net.res_bus before computing base_score
+pp.runpp(net, algorithm="nr", calculate_voltage_angles=True)
 base_score = violation_score(net)
 DELTA_MVAR = 5.0
 V_n = np.zeros(len(candidate_buses))
@@ -728,8 +730,10 @@ except Exception as e:
 
 # %%
 import rustworkx as rx
-from rustworkx.visualization import mpl_draw
-import matplotlib.lines as mlines
+import plotly.graph_objects as go
+import ipywidgets as widgets
+from IPython.display import display
+import numpy as np
 
 try:
     # Load the quantum non-dominated solutions
@@ -737,71 +741,107 @@ try:
     all_samples = np.load(config.results_folder + 'samples.npy')
     
     if len(nd_positions) > 0:
-        # Create rustworkx graph from our edges
+        # 1. Create rustworkx graph natively
         rx_graph = rx.PyGraph()
         rx_graph.add_nodes_from(range(num_buses))
         rx_graph.add_edges_from_no_data([(u, v) for u, v in edges])
         
-        # Load the objective values for labeling
+        # Calculate static layout coordinates
+        pos_dict = rx.spring_layout(rx_graph, seed=42)
         q_pts = np.load(config.results_folder + 'non_dominated_samples.npy')
 
-        def plot_solution(sol_idx):
+        # Build Edge Coordinates (Static)
+        edge_x, edge_y = [], []
+        for u, v in edges:
+            x0, y0 = pos_dict[u]
+            x1, y1 = pos_dict[v]
+            edge_x.extend([x0, x1, None])
+            edge_y.extend([y0, y1, None])
+
+        # Define an empty shell FigureWidget with the exact 4 traces we need
+        # Trace 0: Edges, Trace 1: Placed, Trace 2: Standard, Trace 3: Non-candidate
+        fig = go.FigureWidget(
+            data=[
+                go.Scatter(x=edge_x, y=edge_y, line=dict(width=1.5, color='#888'), hoverinfo='none', mode='lines', name='Edges'),
+                go.Scatter(x=[], y=[], mode='markers+text', text=[], textposition="top center", name='Microgrid/Storage Placed (1)', marker=dict(color='#FF6B6B', size=24)),
+                go.Scatter(x=[], y=[], mode='markers+text', text=[], textposition="top center", name='Standard Bus (0)', marker=dict(color='#4ECDC4', size=24)),
+                go.Scatter(x=[], y=[], mode='markers+text', text=[], textposition="top center", name='Non-candidate Bus', marker=dict(color='#E0E0E0', size=24))
+            ],
+            layout=go.Layout(
+                title=dict(text="", font=dict(size=14)),
+                showlegend=True,
+                hovermode='closest',
+                margin=dict(b=20, l=5, r=5, t=60),
+                xaxis=dict(showgrid=False, zeroline=False, showticklabels=False),
+                yaxis=dict(showgrid=False, zeroline=False, showticklabels=False),
+                width=800, height=600,
+                template="plotly_white"
+            )
+        )
+
+        def update_plot_data(sol_idx):
+            """Mutably updates the existing figure data without recreating the plot."""
             best_config = all_samples[nd_positions[sol_idx]]
             obj_vals = q_pts[sol_idx]
             
-            node_colors = []
+            placed_x, placed_y, placed_text = [], [], []
+            standard_x, standard_y, standard_text = [], [], []
+            nc_x, nc_y, nc_text = [], [], []
+            
             for bus in range(num_buses):
+                x, y = pos_dict[bus]
                 if bus in pruned_buses:
                     idx = pruned_buses.index(bus)
                     if best_config[idx] == 1:
-                        node_colors.append('#FF6B6B') # Red
+                        placed_x.append(x)
+                        placed_y.append(y)
+                        placed_text.append(f"Bus {bus}")
                     else:
-                        node_colors.append('#4ECDC4') # Blue/Green
+                        standard_x.append(x)
+                        standard_y.append(y)
+                        standard_text.append(f"Bus {bus}")
                 else:
-                    node_colors.append('#E0E0E0') # Lightgray
-            
-            plt.figure(figsize=(10, 8))
-            plt.title(f'Siting Plan (Solution {sol_idx+1}/{len(nd_positions)})\n'
-                      f'Voltage Dev: {obj_vals[0]:.4f} | Cost: {obj_vals[1]:.4f} | Reliability: {obj_vals[2]:.4f}', 
-                      fontsize=13, pad=15)
-            mpl_draw(rx_graph, node_color=node_colors, with_labels=True, node_size=600, font_size=10, font_color='black')
-            
-            mg_legend = mlines.Line2D([], [], color='#FF6B6B', marker='o', linestyle='None', markersize=10, label='Microgrid/Storage Placed (1)')
-            bus_legend = mlines.Line2D([], [], color='#4ECDC4', marker='o', linestyle='None', markersize=10, label='Standard Bus (0)')
-            nc_legend = mlines.Line2D([], [], color='#E0E0E0', marker='o', linestyle='None', markersize=10, label='Non-candidate Bus')
-            plt.legend(handles=[mg_legend, bus_legend, nc_legend], loc='upper right')
-            plt.show()
+                    nc_x.append(x)
+                    nc_y.append(y)
+                    nc_text.append(f"Bus {bus}")
 
-        # Check if we are running in an interactive Jupyter environment
-        try:
-            __IPYTHON__
-            import ipywidgets as widgets
-            from IPython.display import display
-            
-            slider = widgets.IntSlider(
-                min=0, max=len(nd_positions)-1, step=1, 
-                value=len(nd_positions)//2, 
-                description='Pareto Index'
-            )
-            out = widgets.Output()
-            
-            def update_plot(change):
-                sol_idx = change['new']
-                with out:
-                    out.clear_output(wait=True)
-                    plt.close('all')
-                    plot_solution(sol_idx)
-                    
-            slider.observe(update_plot, names='value')
-            display(slider)
-            display(out)
-            
-            # Initial draw
-            with out:
-                plot_solution(slider.value)
-        except (NameError, ImportError):
-            # Fallback to plotting the middle compromise solution statically
-            plot_solution(len(nd_positions) // 2)
+            # Send data directly into the active traces
+            with fig.batch_update():
+                fig.data[1].x = placed_x
+                fig.data[1].y = placed_y
+                fig.data[1].text = placed_text
+                
+                fig.data[2].x = standard_x
+                fig.data[2].y = standard_y
+                fig.data[2].text = standard_text
+                
+                fig.data[3].x = nc_x
+                fig.data[3].y = nc_y
+                fig.data[3].text = nc_text
+                
+                fig.layout.title.text = (
+                    f'Siting Plan (Solution {sol_idx+1}/{len(nd_positions)})<br>'
+                    f'Voltage Dev: {obj_vals[0]:.4f} | Cost: {obj_vals[1]:.4f} | Reliability: {obj_vals[2]:.4f}'
+                )
+
+        # Connect the slider to update data points rather than redraw the canvas
+        slider = widgets.IntSlider(
+            min=0, max=len(nd_positions)-1, step=1, 
+            value=len(nd_positions)//2, 
+            description='Pareto Index'
+        )
+        
+        def on_slider_change(change):
+            update_plot_data(change['new'])
+                
+        slider.observe(on_slider_change, names='value')
+        
+        # Run the initial population data sync
+        update_plot_data(slider.value)
+        
+        # Combine layout cleanly: slider on top, single persistent figure directly underneath
+        layout_box = widgets.VBox([slider, fig])
+        display(layout_box)
             
     else:
         print("No non-dominated solutions found to visualize.")
