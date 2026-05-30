@@ -25,15 +25,19 @@
 # ---
 
 # %% [markdown]
-# # Quantum Chemistry for Auger Spectroscopy in EUV Lithography
+# # Quantum Chemistry for Spectroscopy in EUV Lithography
 # **Team Name:** Entangled Trio
 #
-# This notebook demonstrates the Generative Quantum Eigensolver (GQE) combined with the Quantum Self-Consistent Equation-of-Motion (q-sc-EOM) and One-Center Approximation (OCA) for simulating core-level Auger electron spectra for $\rm H_2O$.
+# This notebook demonstrates the calculation of $\rm H_2O$ spectra:
+# - **Auger Electron Spectrum**: Using the Generative Quantum Eigensolver (GQE) combined with the Quantum Self-Consistent Equation-of-Motion (q-sc-EOM) and One-Center Approximation (OCA), based on the work by [Keithley et al.](https://arxiv.org/abs/2603.12859)
+# - **Photoabsorption Spectrum**: Using the time-domain Green's function propagated via a second-order Trotter product formula on a Compressed Double-Factorized (CDF) Hamiltonian, based on the work by [Kharazi et al.](https://arxiv.org/abs/2602.20234)
 #
-# Inspired by the workflow in [Keithley et al.](https://arxiv.org/abs/2603.12859v1) shown below:
+# Below is an image taken from both papers and illustrates how we combined both approaches.
+#
+
 
 # %% [markdown]
-# ![mi](../../img/workflow_fig.png)
+# ![mi](../../img/pipeline.png)
 
 # %% [markdown]
 # ## Setup
@@ -66,14 +70,21 @@ current_file_dir = get_current_file_dir()
 # * **`USE_DIT`**: If `True`, enable Diffusion Transformer (DIT) for GQE training as an alternative to the auto-regressive GPTnano.
 # * **`USE_AVAS`**: If `True`, apply Active Space Selection (AVAS) to reduce the molecular active space size.
 # * **`USE_H2O_OPTIMIZATIONS`**: If `True`, enable specialized performance optimizations for the $\rm H_2O$ molecule.
-# * **`USE_CDF`**: If `True`, enable Compressed Double Factorization (CDF) to calculate a low-rank Hamiltonian approximation to linear scaling.
+# * **`USE_CDF_*`**: Enable Compressed Double Factorization (CDF) to calculate a low-rank Hamiltonian approximation with linear scaling.
+#     * **`USE_CDF_EMISSION`**: If `True`, apply CDF to the Auger emission Hamiltonian, yielding a low-rank two-body approximation.
+#     * **`USE_CDF_ABSORPTION`**: If `True`, apply CDF to the absorption spectrum Hamiltonian, using factorized Trotter evolution instead of the full molecular Hamiltonian.
+# * **`ANALYTIC_QUANTUM_ABSORPTION`**: If `True`, use exact (analytic) statevector expectation values for the Hadamard-test measurements in the absorption simulation, removing shot noise. Set to `False` to simulate finite-shot sampling with an exponentially-decaying kernel allocation.
+# * **`SAVE_PLOTS`**: If `True`, export matplotlib rasterized copies of the Auger and absorption spectra to PNG files alongside the interactive hvplot output.
 
 # %%
 USE_CUDAQ = False
 USE_DIT = False
 USE_AVAS = False
 USE_H2O_OPTIMIZATIONS = True
-USE_CDF = False
+USE_CDF_EMISSION = False
+USE_CDF_ABSORPTION = True
+ANALYTIC_QUANTUM_ABSORPTION = True
+SAVE_PLOTS = False
 
 cache_dir = os.path.join(current_file_dir, "data", "qsceom")
 cache_suffix = "_avas" if USE_AVAS else ""
@@ -107,7 +118,7 @@ import numpy as np
 import pennylane as qml
 import pubchempy as pcp
 
-def compute_cdf_hamiltonian(molecule, hamiltonian, use_avas, active_electrons_val, active_orbitals_val, molecule_name):
+def compute_cdf_hamiltonian(molecule, hamiltonian, use_avas, active_electrons_val, active_orbitals_val, molecule_name, use_bliss=True):
     """Computes the Compressed Double Factorization (CDF) representation of the Hamiltonian."""
     print(f"Constructing CDF Hamiltonian for {molecule_name}...")
     import optax
@@ -125,13 +136,18 @@ def compute_cdf_hamiltonian(molecule, hamiltonian, use_avas, active_electrons_va
         nuc_core, one_body, two_body = qml.qchem.electron_integrals(molecule)()
 
     # Convert to chemist notation
-    two_chem = 0.5 * qml.math.swapaxes(two_body, 1, 3)  # V_pqrs
+    two_chem = qml.math.swapaxes(two_body, 1, 3)  # V_pqrs
     one_chem = one_body - 0.5 * qml.math.einsum("pqss", two_body)  # T_pq
 
-    # Apply Block-Invariant Symmetry Shift (BLISS)
-    core_shift, one_shift, two_shift = qml.qchem.symmetry_shift(
-        nuc_core, one_chem, two_chem, n_elec=active_electrons_val
-    )
+    if use_bliss:
+        # Apply Block-Invariant Symmetry Shift (BLISS)
+        core_shift, one_shift, two_shift = qml.qchem.symmetry_shift(
+            nuc_core, one_chem, two_chem, n_elec=active_electrons_val
+        )
+    else:
+        core_shift = [nuc_core]
+        one_shift = one_chem
+        two_shift = two_chem
 
     # Compressed Double Factorization (CDF)
     factors, two_body_cores, two_body_leaves = qml.qchem.factorize(
@@ -386,7 +402,7 @@ def get_hamiltonian_terms_len(h):
     return len(getattr(h, "ops", getattr(h, "operands", [])))
 
 # 1. Load via qchem
-qchem_molecule_data = generate_molecule_data(target_molecule, source="qchem", use_avas=USE_AVAS, use_cdf=USE_CDF)
+qchem_molecule_data = generate_molecule_data(target_molecule, source="qchem", use_avas=USE_AVAS, use_cdf=USE_CDF_EMISSION)
 qchem_data = qchem_molecule_data[target_molecule]
 
 print(f"--- {target_molecule} (qchem) ---")
@@ -397,7 +413,7 @@ print(f"FCI Energy: {qchem_data['expected_ground_state_E']}")
 print(f"Hamiltonian terms: {get_hamiltonian_terms_len(qchem_data['hamiltonian'])}")
 
 # 2. Load via PubChem
-pubchem_molecule_data = generate_molecule_data(target_molecule, source="pubchem", use_avas=USE_AVAS, use_cdf=USE_CDF)
+pubchem_molecule_data = generate_molecule_data(target_molecule, source="pubchem", use_avas=USE_AVAS, use_cdf=USE_CDF_EMISSION)
 pubchem_data = pubchem_molecule_data[target_molecule]
 
 print(f"\n--- {target_molecule} (PubChem) ---")
@@ -420,7 +436,7 @@ op_pool_size = len(op_pool)
 # If CDF is enabled, we display details of the factorization fragments, reconstruction error, and compression ratio.
 
 # %%
-if USE_CDF and isinstance(hamiltonian, dict) and "core_tensors" in hamiltonian:
+if USE_CDF_EMISSION and isinstance(hamiltonian, dict) and "core_tensors" in hamiltonian:
     n_orbitals = hamiltonian["n_orbitals"]
     df_upper_bound = n_orbitals ** 2
     num_two_body_factors = len(hamiltonian["core_tensors"]) - 1
@@ -1467,6 +1483,7 @@ import numpy as np
 import pandas as pd
 import holoviews as hv
 import hvplot.pandas
+hv.extension('matplotlib')
 
 HARTREE_TO_EV = 27.211386245988
 device = torch.device("mps" if torch.backends.mps.is_available() else "cpu")
@@ -1824,37 +1841,387 @@ if len(classical_peaks) > 0:
 
 df_spectrum = pd.DataFrame(df_spectrum_dict)
 
-gqe_plot = df_spectrum.hvplot.line(
-    x="Kinetic Energy (eV)",
-    y="GQE (quantum)",
-    label="GQE (quantum)",
-    color="darkred",
-    width=900,
-    height=450,
-)
+import matplotlib.pyplot as plt
+from IPython.display import display
 
+fig, ax = plt.subplots(figsize=(9, 4.5))
+ax.plot(df_spectrum["Kinetic Energy (eV)"], df_spectrum["GQE (quantum)"], label="GQE (quantum)", color="darkred")
 if "Classical Reference" in df_spectrum.columns:
-    classical_plot = df_spectrum.hvplot.line(
-        x="Kinetic Energy (eV)",
-        y="Classical Reference",
-        label="OpenMolcas RASSI",
-        color="blue",
-        line_dash="dashed",
-    )
-    spectrum_fig = (gqe_plot * classical_plot).opts(
-        title=f"Auger Spectrum: GQE vs Classical Reference",
-        ylabel="Normalized Intensity",
-        legend_position="top_right",
-        fontscale=1.2,
-    )
-else:
-    spectrum_fig = gqe_plot.opts(
-        title=f"Auger Spectrum: GQE (quantum)",
-        ylabel="Normalized Intensity",
-        legend_position="top_right",
-        fontscale=1.2,
-    )
+    ax.plot(df_spectrum["Kinetic Energy (eV)"], df_spectrum["Classical Reference"], "--", label="OpenMolcas RASSI", color="blue")
+ax.set_title("Auger Spectrum: GQE vs Classical Reference")
+ax.set_xlabel("Kinetic Energy (eV)")
+ax.set_ylabel("Normalized Intensity")
+ax.legend(loc="upper right")
+fig.tight_layout()
 
-spectrum_fig
+if SAVE_PLOTS:
+    plot_path = os.path.join(current_file_dir, "emission_spectrum.png")
+    fig.savefig(plot_path, dpi=300)
+    print(f"Saved emission spectrum plot to {plot_path}")
+
+display(fig)
+plt.close(fig)
+
+# %% [markdown]
+# # Step 5: Absorption Spectroscopy Simulation
+#
+# In this section, we implement the time-domain absorption spectroscopy simulation for the $\rm H_2O$ active space in the 10-100 eV range.
+# Since $\rm H_2O$ has only valence excitations (no core-level transitions) below 100 eV in the minimal STO-3G basis, we expect the classical baseline to show peaks in the 10-45 eV region and be flat in the 45-100 eV range (encompassing the 92 eV EUV regime).
+#
+# We also implement caching to avoid re-running the expensive time-domain simulation and classical transition dipole calculations on subsequent runs.
+
+# %% [markdown]
+# ## Step 5.1: Molecular Setup and PySCF CASCI Ground State
+# We initialize the PySCF `Mole` and run Hartree-Fock to get molecular orbital coefficients. 
+# Then, we compute the ground state wavefunction under the complete active space configuration interaction (CASCI) method and convert it to a PennyLane-compatible statevector.
+
+# %%
+from pyscf import gto, scf, mcscf
+from scipy.sparse import coo_matrix
+from pyscf.fci.cistring import addrs2str
+from pennylane.qchem.convert import _sign_chem_to_phys, _wfdict_to_statevector
+from jax import config
+from itertools import product
+import pandas as pd
+import hvplot.pandas
+import pickle
+
+# Ensure JAX uses float64 for factorization alignment
+config.update("jax_enable_x64", True)
+
+# Define absorption caching directory and path
+absorption_cache_dir = os.path.join(current_file_dir, "data", "absorption")
+absorption_cache_path = os.path.join(
+    absorption_cache_dir, 
+    f"absorption_cache{'_cdf' if USE_CDF_ABSORPTION else '_nocdf'}.pkl"
+)
+use_cache_absorption = os.path.exists(absorption_cache_path)
+
+if use_cache_absorption:
+    print(f"Pre-computed absorption results found at {absorption_cache_path}. Loading cache...")
+    with open(absorption_cache_path, "rb") as f_abs:
+        abs_cache_data = pickle.load(f_abs)
+    expvals = abs_cache_data["expvals"]
+    dipole_norm = abs_cache_data["dipole_norm"]
+    wgrid_ev = abs_cache_data["wgrid_ev"]
+    spectrum = abs_cache_data["spectrum"]
+    spectrum_classical = abs_cache_data["spectrum_classical"]
+    print("Successfully loaded pre-computed absorption simulation data.")
+else:
+    print("No absorption cache found. Computing simulation...")
+
+# Retrieve symbols and geometry from qchem_data
+symbols = qchem_data["symbols"]
+geometry = qchem_data["geometry"]
+
+# Build PySCF Mole object and run SCF
+mol = gto.Mole(atom=list(zip(symbols, geometry)), basis="sto-3g", symmetry=None, unit="bohr")
+mol.build(verbose=0)
+
+hf = scf.RHF(mol)
+hf.run(verbose=0)
+
+# Build PennyLane Molecule object and match MO coefficients
+mole = qml.qchem.Molecule(symbols, geometry, basis_name="sto-3g", unit="bohr")
+_, coeffs, _, _, _ = qml.qchem.scf(mole)()
+hf.mo_coeff = coeffs
+
+# Setup active space
+n_cas = qchem_data["active_orbitals"]
+n_electron_cas = qchem_data["active_electrons"]
+n_core = (mol.nelectron - n_electron_cas) // 2
+
+if not use_cache_absorption:
+    # Solve ground state to convert to PennyLane statevector
+    mycasci = mcscf.CASCI(hf, ncas=n_cas, nelecas=n_electron_cas)
+    mycasci.run(verbose=0)
+    casci_state = mycasci.ci
+    casci_state[abs(casci_state) < 1e-6] = 0
+    E_i = mycasci.e_tot
+
+    # Convert CASCI ground state vector to dictionary format and adjust spin ordering sign
+    sparse_cascimatr = coo_matrix(casci_state, shape=np.shape(mycasci.ci), dtype=float)
+    row, col, dat = sparse_cascimatr.row, sparse_cascimatr.col, sparse_cascimatr.data
+    strs_row = addrs2str(n_cas, n_electron_cas // 2, row)
+    strs_col = addrs2str(n_cas, n_electron_cas // 2, col)
+    wf_casci_dict = dict(zip(list(zip(strs_row, strs_col)), dat))
+    wf_casci_dict = _sign_chem_to_phys(wf_casci_dict, n_cas)
+    wf_casci = _wfdict_to_statevector(wf_casci_dict, n_cas)
+
+# %% [markdown]
+# ## Step 5.2: Transition Dipole Moments Construction
+# We generate the dipole moment operators in the active space and project the ground state wavefunction to obtain the initial states $\hat{m}_\rho |I\rangle$ along the $x, y, z$ cartesian coordinates.
+
+# %%
+if not use_cache_absorption:
+    # Dipole moment operator in molecular orbital basis
+    core, active = qml.qchem.active_space(
+        mole.n_electrons, mole.n_orbitals, 
+        active_electrons=n_electron_cas, 
+        active_orbitals=n_cas
+    )
+    m_rho = qml.qchem.dipole_moment(mole, cutoff=1e-8, core=core, active=active)()
+    rhos = range(len(m_rho))
+
+    wf_dipole = []
+    dipole_norm = []
+
+    # Project initial state using the dipole moment operators
+    for rho in rhos:
+        dipole_matrix_rho = qml.matrix(m_rho[rho], wire_order=range(2 * n_cas))
+        wf = dipole_matrix_rho.dot(wf_casci)
+        if np.allclose(wf, np.zeros_like(wf)):
+            wf_dipole.append(wf)
+            dipole_norm.append(0.0)
+        else:
+            norm_val = np.linalg.norm(wf)
+            dipole_norm.append(norm_val)
+            wf_dipole.append(wf / norm_val)
+
+# %% [markdown]
+# ## Step 5.3: Compressed Double Factorization (CDF) of the Hamiltonian
+# We use the pre-defined helper method `compute_cdf_hamiltonian` to perform Compressed Double Factorization on the active space Hamiltonian.
+# This yields the low-rank two-body fragments, the corrected one-body term, and the constant energy shift (including Block-Invariant Symmetry Shift, BLISS, for Trotter error minimization).
+
+# %%
+if not use_cache_absorption:
+    if USE_CDF_ABSORPTION:
+        # Call the helper method to compute the CDF Hamiltonian representation
+        cdf_res = compute_cdf_hamiltonian(
+            molecule=mole,
+            hamiltonian=None,
+            use_avas=True,
+            active_electrons_val=n_electron_cas,
+            active_orbitals_val=n_cas,
+            molecule_name="H2O",
+            use_bliss=False
+        )
+
+        core_constant = cdf_res["nuc_constant"]
+        _Z = cdf_res["core_tensors"]
+        _U = cdf_res["leaf_tensors"]
+    else:
+        # Generate the standard molecular Hamiltonian on the active space
+        h_exact, _ = qml.qchem.molecular_hamiltonian(
+            symbols, geometry, active_electrons=n_electron_cas, active_orbitals=n_cas, unit="bohr"
+        )
+        # Map wires of h_exact to [1, ..., 2 * n_cas] to avoid conflict with the control qubit on wire 0
+        h_mapped = qml.map_wires(h_exact, {i: i + 1 for i in range(2 * n_cas)})
+
+# %% [markdown]
+# ## Step 5.4: Quantum Circuit Setup (Hadamard Test & Trotter Evolution)
+# We define the QNodes and auxiliary functions implementing the first- and second-order Trotter product formula step.
+
+# %%
+if not use_cache_absorption:
+    # Setup simulated device and QNodes
+    device_type = "lightning.qubit"
+    dev_prop = qml.device(device_type, wires=int(2*n_cas) + 1)
+
+    # Simulation parameters
+    eta = 0.05
+    H_norm = np.pi
+    tau = np.pi / (2 * H_norm)
+
+    @qml.qnode(dev_prop)
+    def initial_circuit(wf):
+        qml.StatePrep(wf, wires=dev_prop.wires.tolist()[1:])
+        qml.Hadamard(wires=0)
+        return qml.state()
+
+    if USE_CDF_ABSORPTION:
+        def U_rotations(U, control_wires):
+            U_spin = qml.math.kron(U, qml.math.eye(2))
+            qml.BasisRotation(
+                unitary_matrix=U_spin, wires=[int(i + control_wires) for i in range(2 * n_cas)]
+            )
+
+        def Z_rotations(Z, step, is_one_electron_term, control_wires):
+            if is_one_electron_term:
+                for sigma in range(2):
+                    for i in range(n_cas):
+                        qml.ctrl(
+                            qml.X(wires=int(2*i + sigma + control_wires)),
+                            control=range(control_wires),
+                            control_values=0,
+                        )
+                        qml.RZ(-Z[i, i] * step / 2, wires=int(2*i + sigma + control_wires))
+                        qml.ctrl(
+                            qml.X(wires=int(2*i + sigma + control_wires)),
+                            control=range(control_wires),
+                            control_values=0,
+                        )
+                globalphase = np.sum(Z) * step
+            else:
+                for sigma, tau_spin in product(range(2), repeat=2):
+                    for i, k in product(range(n_cas), repeat=2):
+                        if i != k or sigma != tau_spin:
+                            qml.ctrl(qml.X(wires=int(2*i + sigma + control_wires)),
+                                     control=range(control_wires), control_values=0)
+                            qml.MultiRZ(Z[i, k] / 8.0 * step,
+                                wires=[int(2*i + sigma + control_wires),
+                                       int(2*k + tau_spin + control_wires)])
+                            qml.ctrl(qml.X(wires=int(2 * i + sigma + control_wires)),
+                                control=range(control_wires), control_values=0)
+                globalphase = np.trace(Z)/4.0*step - np.sum(Z)*step/2.0
+            qml.PhaseShift(-globalphase, wires=0)
+
+        def first_order_trotter(step, prior_U, final_rotation, reverse=False):
+            num_two_electron_fragments = _U.shape[0] - 1
+            is_one_body = np.array([True] + [False] * num_two_electron_fragments)
+            order = list(range(len(_Z)))
+
+            if reverse:
+                order = order[::-1]
+
+            for fragment in order:
+                U_rotations(prior_U @ _U[fragment], 1)
+                Z_rotations(_Z[fragment], step, is_one_body[fragment], 1)
+                prior_U = _U[fragment].T
+
+            if final_rotation:
+                U_rotations(prior_U, 1)
+
+            qml.PhaseShift(-core_constant * step, wires=0)
+            return prior_U
+
+    # Define compiled step and measurement QNodes to avoid recompiling overhead
+    @qml.qnode(dev_prop)
+    def trotter_step_circuit(state_in):
+        qml.StatePrep(state_in, wires=dev_prop.wires.tolist())
+        if USE_CDF_ABSORPTION:
+            prior_U = np.eye(n_cas)
+            prior_U = first_order_trotter(tau / 2, prior_U=prior_U, 
+                                          final_rotation=False, reverse=False)
+            prior_U = first_order_trotter(tau / 2, prior_U=prior_U, 
+                                          final_rotation=True, reverse=True)
+        else:
+            qml.ctrl(qml.TrotterProduct(h_mapped, time=tau, order=2), control=0)
+        return qml.state()
+
+    @qml.qnode(dev_prop)
+    def measurement_circuit(state_in):
+        qml.StatePrep(state_in, wires=dev_prop.wires.tolist())
+        return [qml.expval(op) for op in [qml.PauliX(wires=0), qml.PauliY(wires=0)]]
+
+
+# %% [markdown]
+# ## Step 5.5: Time-Domain Quantum Simulation Run
+# We execute the time-domain quantum propagation over 200 time-steps using a kernel-aware sampling distribution that allocates shots exponentially decaying with time.
+
+# %%
+if not use_cache_absorption:
+    jmax = 100
+    total_shots = 500 * 2 * jmax
+    jrange = np.arange(1, 2 * int(jmax) + 1, 1)
+    time_interval = tau * jrange
+
+    def L_j(t_j):
+        return np.exp(-eta * t_j)
+
+    alpha = 1.1
+    A = np.sum([L_j(alpha * t_j) for t_j in time_interval])
+    shots_list = [int(round(total_shots * L_j(alpha * t_j) / A)) for t_j in time_interval]
+
+    expvals = np.zeros((2, len(time_interval)))
+
+    # Execute time-domain quantum simulation
+    print("\n--- Running Absorption Spectrum Time-Domain Simulation ---")
+    for rho in rhos:
+        if dipole_norm[rho] == 0:
+            continue
+        state = initial_circuit(wf_dipole[rho])
+        for i in range(0, len(time_interval)):
+            state = trotter_step_circuit(state)
+            if ANALYTIC_QUANTUM_ABSORPTION:
+                measurement = measurement_circuit(state)
+            else:
+                shots = shots_list[i]
+                measurement = qml.set_shots(measurement_circuit, shots)(state)
+            expvals[:, i] += dipole_norm[rho]**2 * np.array(measurement).real
+
+# %% [markdown]
+# ## Step 5.6: Fourier Transform Post-Processing & Classical Validation Plot
+# We Fourier-transform the quantum time-domain signal to the frequency domain (10-100 eV range).
+# For validation, we solve for 250 CASCI roots using PySCF's FCI solver to obtain the exact classical reference spectrum, and plot them overlayed.
+
+# %%
+if not use_cache_absorption:
+    # Discrete Fourier transform post-processing
+    L_js = L_j(time_interval)
+    f_domain_Greens_func = (
+        lambda w: tau/(2*np.pi) * (np.sum(np.array(dipole_norm)**2) 
+                + 2*np.sum(L_js * (expvals[0, :] * np.cos(time_interval * w)
+                - expvals[1, :] * np.sin(time_interval * w)))))
+
+    # Define range in eV (10 eV to 100 eV)
+    wgrid_ev = np.linspace(10.0, 100.0, 10000)
+    wgrid = E_i + wgrid_ev / 27.211386
+    w_min, w_step = wgrid[0], wgrid[1] - wgrid[0]
+
+    spectrum = np.array([f_domain_Greens_func(w) for w in wgrid])
+
+    # Compute Classical spectrum reference (FCI / CASCI)
+    print("Solving for classical transition dipole moments...")
+    mycasci.fcisolver.nroots = 250
+    mycasci.run(verbose=0)
+    energies = mycasci.e_tot
+    E_i_val = mycasci.e_tot[0]
+
+    # Determine the dipole integrals using atomic orbitals and convert to molecular orbital basis
+    dip_ints_ao = hf.mol.intor("int1e_r_cart", comp=3)
+    mo_coeffs = coeffs[:, n_core : n_core + n_cas]
+    dip_ints_mo = qml.math.einsum("ik,xkl,lj->xij", mo_coeffs.T, dip_ints_ao, mo_coeffs)
+
+    def final_state_overlap(ci_id):
+        t_dm1 = mycasci.fcisolver.trans_rdm1(
+            mycasci.ci[0], mycasci.ci[ci_id], n_cas, n_electron_cas
+        )
+        return qml.math.einsum("xij,ji->x", dip_ints_mo, t_dm1)
+
+    F_m_Is = np.array([final_state_overlap(i) for i in range(len(energies))])
+    spectrum_classical_func = lambda E: (1 / np.pi) * np.sum(
+                    [np.sum(np.abs(F_m_I)**2) * eta / ((E - e)**2 + eta**2)
+                        for (F_m_I, e) in zip(F_m_Is, energies)])
+
+    spectrum_classical = np.array([spectrum_classical_func(w) for w in wgrid])
+
+    # Save calculated absorption results to cache
+    os.makedirs(absorption_cache_dir, exist_ok=True)
+    abs_cache_data = {
+        "expvals": expvals,
+        "dipole_norm": dipole_norm,
+        "wgrid_ev": wgrid_ev,
+        "spectrum": spectrum,
+        "spectrum_classical": spectrum_classical,
+    }
+    with open(absorption_cache_path, "wb") as f_abs:
+        pickle.dump(abs_cache_data, f_abs)
+    print(f"Cached absorption spectrum simulation results to: {absorption_cache_path}")
+
+# Plotting using hvplot
+df_abs_dict = {
+    "Energy (eV)": wgrid_ev,
+    "Quantum (FT)": spectrum,
+    "Classical (Exact)": spectrum_classical,
+}
+df_abs = pd.DataFrame(df_abs_dict)
+
+fig, ax = plt.subplots(figsize=(9, 4.5))
+ax.plot(df_abs["Energy (eV)"], df_abs["Quantum (FT)"], label="Quantum (FT)", color="darkcyan")
+ax.plot(df_abs["Energy (eV)"], df_abs["Classical (Exact)"], "--", label="Classical (Exact)", color="magenta")
+ax.set_title("Simulated Absorption Spectrum for H2O Active Space")
+ax.set_xlabel("Energy (eV)")
+ax.set_ylabel("Absorption (arb.)")
+ax.legend(loc="upper right")
+fig.tight_layout()
+
+if SAVE_PLOTS:
+    plot_path = os.path.join(current_file_dir, "absorption_spectrum.png")
+    fig.savefig(plot_path, dpi=300)
+    print(f"Saved absorption spectrum plot to {plot_path}")
+
+display(fig)
+plt.close(fig)
 
 # Done
