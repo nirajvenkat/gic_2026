@@ -100,6 +100,8 @@ The DiTQE model converged to a minimum energy of $-75.0276$~Hartrees, achieving 
 
 Using GQE reference states, q-sc-EOM resolved the excited states. Minimal basis projection and contraction with atomic integrals yielded Auger decay rates. Applying Lorentzian broadening simulated the final spectrum, reproducing the main peak at $E_{\rm kin} = 502.4$~eV, which aligns with experimental Oxygen K-LL Auger emission bands.
 
+Additionally, we simulated the EUV absorption spectrum of the ${\rm H_2O}$ benchmark in the 10--100~eV range using a time-domain Green's function propagated via a second-order Trotter product formula on the factorized Hamiltonian. The quantum-simulated spectrum shows excellent agreement with the exact classical CASCI baseline, resolving the physical valence excitations in the 10--45~eV regime and dropping to a flat zero baseline in the 45--100~eV range. This confirms that ${\rm H_2O}$ has no dipole-allowed transitions near the 92~eV EUV regime in a minimal STO-3G basis, serving as a key validation stepping stone for core-level EUV absorption calculations of candidate photoresists like IMePh (4-iodo-2-methylphenol) where Iodine 4d core-excitations are active at 92~eV.
+
 \section{Quantum Platform Justification and Resource Needs}
 Requested: 8xB200-180GB-SXM6 (Alternative: 8xH100-80GB-SXM5).
 FP64 state-vector memory: 34 qubits (274.8 GB), 35 qubits (549.7 GB), 36 qubits (1,099.5 GB).
