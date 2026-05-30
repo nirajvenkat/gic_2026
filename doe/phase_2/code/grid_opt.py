@@ -282,7 +282,7 @@ def _run_qamoo_workflow(data_root: str, run_id: str, num_qubits: int, num_object
 #   * `[1, 2, 3]`: PEC + SLC + Propagated Noise Absorption (PNA)
 
 # %%
-GRID_CASE = "IEEE-14" # Toggle between "IEEE-33" and "IEEE-14"
+GRID_CASE = "IEEE-33" # Choose between "IEEE-33" and "IEEE-14"
 USE_QPU = False
 USE_SAMPLOMATIC = False
 SAMPLOMATIC_METHODS = []
@@ -293,9 +293,11 @@ SAMPLOMATIC_METHODS = []
 # %%
 # Load selected system
 if GRID_CASE == "IEEE-33":
-    net = nw.case33bw()
-elif GRID_CASE == "IEEE-14":
     net = nw.case14()
+elif GRID_CASE == "IEEE-14":
+    net = nw.case33bw()
+elif GRID_CASE == "IEEE-39":
+    net = nw.case39()
 else:
     raise ValueError(f"Unknown GRID_CASE: {GRID_CASE}")
 
@@ -317,7 +319,7 @@ candidate_buses = [b for b in net.bus.index.tolist() if b not in slack_buses]
 print("Computing voltage sensitivities V_n...")
 def violation_score(network):
     vm = network.res_bus["vm_pu"]
-    return float(np.sum((vm - 1.0) ** 2))
+    return float(np.sum((vm_max - 1.0) ** 2))
 
 # Run base power flow to populate net.res_bus before computing base_score
 pp.runpp(net, algorithm="nr", calculate_voltage_angles=True)
@@ -372,7 +374,7 @@ if dist_max > 0:
     dist_n = dist_n / dist_max
 
 # 4. Pruning to top-15 candidate buses by voltage sensitivity V_n
-PRUNE_TOP_N = 15
+PRUNE_TOP_N = 22
 if PRUNE_TOP_N is not None and len(candidate_buses) > PRUNE_TOP_N:
     top_idx = np.argsort(V_n)[::-1][:PRUNE_TOP_N]
     top_idx_sort = np.sort(top_idx)
