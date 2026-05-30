@@ -34,7 +34,7 @@
 % PAGE 2: MAIN BODY
 % ----------------------------------------------------
 \section{Focus Area, Rationale, and Stakeholder Relevance}
-This project simulates the core-level Auger electron spectra of extreme ultraviolet (EUV) photoresists to evaluate their chemical sensitivity and performance. During EUV lithography, 92 eV exposure induces core-level ionization (e.g., Iodine 4d shell) which undergoes Auger decay cascades. This process generates low-energy secondary electrons that initiate chemical reactions in the photoresist material. Understanding this cascade is essential for optimizing resist sensitivity and resolution at sub-10 nm nodes.
+This project implements a dual extreme ultraviolet (EUV) simulation pipeline to model both the photoabsorption and subsequent core-level Auger electron decay in photoresist materials to evaluate their chemical sensitivity and performance. During EUV lithography, 92 eV exposure first induces photoabsorption to excite or ionize core electrons (e.g., Iodine 4d shell), which subsequently undergo Auger decay cascades. These processes generate low-energy secondary electrons that initiate chemical reactions in the photoresist material. Understanding both the initial absorption and the subsequent decay cascade is essential for optimizing resist sensitivity and resolution at sub-10 nm nodes.
 
 The primary stakeholders and beneficiaries of this work include:
 \begin{itemize}[leftmargin=*,noitemsep,topsep=0pt]
@@ -44,7 +44,9 @@ The primary stakeholders and beneficiaries of this work include:
 \end{itemize}
 
 \section{Technical Methodology and Hybrid Quantum Integration}
-We implement a hybrid quantum-classical chemistry workflow consisting of four key stages: (1) Ground-state reference preparation, (2) Excited-state extraction, (3) Minimal basis projection, and (4) One-Center Approximation (OCA) decay contraction.
+We implement a dual extreme ultraviolet (EUV) simulation pipeline inspired by Kharazi et al.~\cite{kharazi2026} to model both optical absorption and electronic decay in photoresist materials. The pipeline couples two core components: (1) an EUV Auger emission channel modeled via the Generative Quantum Eigensolver (GQE) and quantum self-consistent Equation-of-Motion (q-sc-EOM) framework of Keithley et al.~\cite{keithley2026}, and (2) an EUV photoabsorption channel utilizing the time-domain Green's function propagation algorithm of Kharazi et al.~\cite{kharazi2026}. 
+
+For the Auger emission simulation, the workflow consists of four key stages: (1) Ground-state reference preparation, (2) Excited-state extraction, (3) Minimal basis projection, and (4) One-Center Approximation (OCA) decay contraction.
 
 \subsection{Ground-State Reference Preparation}
 To prepare high-fidelity reference ground states, we employ a Generative Quantum Eigensolver (GQE)~\cite{gqe2024} that generates shallow quantum circuits. We implement two transformer architectures in PyTorch:
@@ -67,6 +69,9 @@ The molecular orbital coefficients $C$ are projected onto the minimal basis set 
   A_k = \sum_{p,q} \gamma_{pq}(K, I) V_{pq}
 \end{equation}
 Applying Fermi's Golden Rule gives the Auger transition rate $\Gamma_k = 2\pi |A_k|^2$. Emitted Auger electron kinetic energy is determined by the difference $E_{\rm kin} = E_I - E_K$. Discrete rates are broadened via a Lorentzian function ($\Gamma = 1.5$~eV) to simulate the spectrum.
+
+\subsection{EUV Photoabsorption Spectrum Simulation}
+The EUV photoabsorption channel simulates the dipole-allowed valence-excitation spectrum under 92 eV radiation. We compute the transition dipole moment operators $\hat{m}_\rho$ in the molecular active space and project the ground state wavefunction to obtain initial states $\hat{m}_\rho |I\rangle$ along the Cartesian coordinates. We then propagate the states in the time-domain under a Compressed Double Factorization (CDF) representation of the Hamiltonian using a second-order Trotter product formula. Measuring the time-dependent expectation values yields the time-domain Green's function $G(t)$, which is Fourier-transformed to resolve the absorption spectrum in the frequency domain.
 
 \section{Data Modeling and Benchmarking Strategy}
 Our data modeling strategy utilizes the standard STO-3G basis set. To scale GQE and q-sc-EOM, we incorporate three acceleration techniques:
@@ -107,16 +112,16 @@ Requested: 8xB200-180GB-SXM6 (Alternative: 8xH100-80GB-SXM5).
 FP64 state-vector memory: 34 qubits (274.8 GB), 35 qubits (549.7 GB), 36 qubits (1,099.5 GB).
 Blackwell (B200-SXM6) Advantages:
 \begin{itemize}[leftmargin=*,noitemsep,topsep=0pt]
-\item Latency: Halves the GPU count for NVLink distribution vs H100 (2 vs 4 GPUs for 34 qubits); SXM6 NVLink-5 bandwidth (1.8 TB/s) minimizes inter-GPU communication bottleneck.
-\item Capacity: 8xB200 offers 1,440 GB VRAM, fitting the 36-qubit space (1,099.5 GB) on a single node. 8xH100 is capped at 640 GB and will go out of memory.
-\item Precision: SXM6 native FP64 throughput prevents rounding errors in the kinetic energy distributions.
+  \item \textbf{Latency}: Halves the GPU count for NVLink distribution vs H100 (2 vs 4 GPUs for 34 qubits); SXM6 NVLink-5 bandwidth (1.8 TB/s) minimizes inter-GPU communication bottleneck.
+  \item \textbf{Capacity}: 8xB200 offers 1,440 GB VRAM, fitting the 36-qubit space (1,099.5 GB) on a single node. 8xH100 is capped at 640 GB and will go out of memory.
+  \item \textbf{Precision}: SXM6 native FP64 throughput prevents rounding errors in the kinetic energy distributions.
 \end{itemize}
 
 \section{Gap Analysis and Implementation Roadmap}
 Our Phase 2 implementation successfully validated the GQE/q-sc-EOM/OCA pipeline on water and established the CUDA-Q and OpenMolcas integration. The Phase 3 roadmap focuses on:
 \begin{itemize}[leftmargin=*,noitemsep,topsep=0pt]
   \item \textbf{IMePh Production Scaling:} Apply natural orbital selection and active space truncation to scale GQE execution to the full active space of 4-iodo-2-methylphenol on physical Blackwell GPU clusters.
-  \item \textbf{Multi-Center Integrals:} Integrate direct HDF5 tables containing the multi-center integrals from OpenMolcas into the OCA contraction.
+  \item \textbf{Pseudopotentials:} Incorporate effective core potentials (ECPs) or pseudopotentials to replace the core electrons of heavy elements like Iodine, which is a critical step to scale both the emission and absorption simulations to large candidate photoresists like IMePh.
 \end{itemize}
 
 \newpage

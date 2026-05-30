@@ -107,7 +107,12 @@ The results show that integrating Benders cuts as static QUBO penalties dramatic
 Note that the exact classical benchmarks (CPLEX and DPA) collapse to a single Pareto point ($|{\rm PF}| = 1$). This is a direct mathematical consequence of the IEEE 33-bus system grid topology being a radial network (a tree graph). Since tree graphs are bipartite, a single bipartition configuration (and its complement) cuts every edge in the graph. Under a pure Max-Cut QUBO formulation, this bipartition simultaneously maximizes all three objectives, removing any trade-offs from the exact Pareto front. Similarly, because $|{\rm PF}| = 1$ for the exact methods, their spacing is mathematically undefined (${\rm N/A}$), whereas Benders-QAMOO with $|{\rm PF}| = 2$ has a spacing of $0.0000$ due to identical symmetric pairwise distances.
 
 \section{Quantum Platform Justification and Resource Needs}
-We request 3 hours of active runtime on IBM Quantum 156-qubit Heron-class QPUs (e.g., Kingston, Fez; 120-qubit Eagle-class as alternative) to execute our error-mitigated Benders-QAMOO workflow. Physical hardware execution is required because classical Tensor Network simulation (Qiskit Aer Matrix Product State) cannot reproduce physical noise. Heron's scale supports direct variable encoding of grid topologies up to 156 bus widths, and its $>99\%$ 2-qubit gate fidelity and low cross-talk are necessary for the Samplomatic PEC maps to extract physical signals (which fail on noisier Eagle systems). The runtime will support 50 to 100 iterative jobs per workflow (QPU execution is reserved strictly for quantum Pareto evaluations, with QAOA parameters pre-trained classically). Each workflow job executes 320 circuits (10 Pareto points $\times$ 32 twirling randomizations) at 125 shots per circuit (40,000 shots total), integrated natively using Qiskit Executor primitives to bypass the standard 10 min/month cap.
+Requested: 156-qubit Heron-class QPUs (e.g., Kingston, Fez). Alternative: 120-qubit Eagle-class.
+\begin{itemize}[leftmargin=*,noitemsep,topsep=0pt]
+  \item \textbf{Scale:} Heron supports up to 156 qubits, enabling direct variable encoding of grid cases up to 156 bus widths.
+  \item \textbf{Fidelity:} Heron's high 2-qubit gate fidelity ($> 99\%$) and low cross-talk are required for Samplomatic to resolve the signal (fails on noisier Eagle systems).
+  \item \textbf{Integration:} Native support for Qiskit Executor primitives.
+\end{itemize}
 
 
 \section{Gap Analysis and Implementation Roadmap}
