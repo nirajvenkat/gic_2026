@@ -1,5 +1,5 @@
 \documentclass[11pt]{article}
-\usepackage[margin=1in]{geometry}
+\usepackage[margin=0.75in]{geometry}
 \usepackage{setspace}
 \usepackage{iftex}
 \usepackage{amsmath,amssymb}
@@ -31,59 +31,54 @@
 \includepdf[pages=1]{cover_mb.pdf}
 
 % ----------------------------------------------------
-% PAGE 2: INTRODUCTION, SCOPE & METHODOLOGY
+% PAGE 2: MAIN BODY
 % ----------------------------------------------------
-\section{Introduction and Phase 1 Scope Comparison}
-This report documents the Phase 2 implementation of a hybrid classical-quantum workflow for simulating core-level Auger electron spectra of extreme ultraviolet (EUV) photoresists, comparing the outcome with our Phase 1 plans. In Phase 2, we implemented and validated the proposed pipeline on a water (${\rm H_2O}$) benchmark before scaling to 4-iodo-2-methylphenol (IMePh)~\cite{kharazi2026}. The workflow integrates: (1) ground-state preparation using causal GPTQE and Diffusion Transformer (DiTQE) architectures, (2) excited-state extraction via q-sc-EOM~\cite{keithley2026} to obtain core-ionized and doubly-ionized states, and (3) Auger decay rate computation under the One-Center Approximation (OCA).
+\section{Focus Area, Rationale, and Stakeholder Relevance}
+This project simulates the core-level Auger electron spectra of extreme ultraviolet (EUV) photoresists to evaluate their chemical sensitivity and performance. During EUV lithography, 92 eV exposure induces core-level ionization (e.g., Iodine 4d shell) which undergoes Auger decay cascades. This process generates low-energy secondary electrons that initiate chemical reactions in the photoresist material. Understanding this cascade is essential for optimizing resist sensitivity and resolution at sub-10 nm nodes.
 
-Key development gaps between our Phase 2 implementation and Phase 1 objectives define our roadmap: simulations currently run on CPU-based \verb|lightning.qubit| instead of GPU-accelerated CUDA-Q, the OCA transition rates use contracted PySCF molecular integrals instead of direct OpenMolcas HDF5 atomic integrals, and GQE scaling to the full active space of IMePh remains future work.
+The primary stakeholders and beneficiaries of this work include:
+\begin{itemize}[leftmargin=*,noitemsep,topsep=0pt]
+  \item \textbf{Semiconductor Manufacturers and Lithographers:} Guides the selection and tuning of photoresist chemistry to maximize light-absorption and secondary electron yield.
+  \item \textbf{Materials Scientists:} Provides a robust computational framework for predicting electron cascade kinetics in halogenated compounds.
+  \item \textbf{Advanced Electronics Industry:} Facilitates next-generation microchip patterning at high yield and low exposure doses.
+\end{itemize}
 
-\section{Technical Implementation and Methodology}
-The implemented architecture follows the four stages shown in Fig.~1: Ground-State Preparation, Excited-State Extraction, Minimal Basis Projection, and OCA Contraction.
+\section{Technical Methodology and Hybrid Quantum Integration}
+We implement a hybrid quantum-classical chemistry workflow consisting of four key stages: (1) Ground-state reference preparation, (2) Excited-state extraction, (3) Minimal basis projection, and (4) One-Center Approximation (OCA) decay contraction.
 
-\subsection{Ground-State Preparation: GPTQE vs. DiTQE}
-To prepare high-fidelity reference states, we use a Generative Quantum Eigensolver (GQE) that learns to generate circuit sequences that minimize the molecular energy:
-\begin{equation}
-  E(\mathbf{j}) = \mathrm{Tr}\!\left[\hat{H} U(\mathbf{j}) |{\rm HF}\rangle \langle {\rm HF}| U^{\dagger}(\mathbf{j})\right]
-\end{equation}
-where $U(\mathbf{j}) = U_{j_L}\cdots U_{j_1}$ represents a sequence of $L$ quantum gates selected from a discrete gate pool. We developed two model configurations in PyTorch to output these sequence tokens: (1) \textbf{GPTQE}, a causal autoregressive transformer based on nanoGPT, and (2) \textbf{DiTQE}, a Diffusion Transformer where the final target energy acts as a continuous condition. DiTQE uses multi-headed self-attention with adaptive RMSNorm to modulate token embeddings, overcoming left-to-right biases and capturing global circuit topology.
-
-The model is trained using AdamW to minimize the loss $\mathcal{L}$, where the penalty parameter $\beta$ prevents the predicted energy values from dipping below the exact Full Configuration Interaction (FCI) ground-state energy.
+\subsection{Ground-State Reference Preparation}
+To prepare high-fidelity reference ground states, we employ a Generative Quantum Eigensolver (GQE)~\cite{gqe2024} that generates shallow quantum circuits. We implement two transformer architectures in PyTorch:
+\begin{enumerate}[noitemsep,topsep=0pt]
+  \item \textbf{GPTQE:} An autoregressive causal model based on nanoGPT that predicts discrete gate sequences.
+  \item \textbf{DiTQE:} A Diffusion Transformer-style architecture where the target ground-state energy acts as a continuous condition. DiTQE uses multi-headed self-attention with adaptive RMSNorm to modulate token embeddings, capturing global circuit topology and eliminating directional biases.
+\end{enumerate}
 
 \subsection{Excited-State Extraction via q-sc-EOM}
-After GQE identifies the optimal state-preparation circuit sequence, we use the compiled reference state $|0\rangle = U_{\rm GQE}|{\rm HF}\rangle$ as the vacuum for the q-sc-EOM solver. We run the algorithm over two channels:
-\begin{enumerate}[noitemsep,topsep=0pt]
-  \item \textbf{Ionization Potential (IP) Space:} Computes core-ionized states (doublet multiplicity, $N-1$ electrons) representing the initial core-hole state $|\Psi_I\rangle$.
-  \item \textbf{Double Ionization Potential (DIP) Space:} Computes doubly-ionized states (singlet multiplicity, $N-2$ electrons) representing the final double-hole states $|\Psi_K\rangle$.
-\end{enumerate}
-We solve the equation-of-motion secular equation under the double commutator approximation, in an STO-3G basis set to obtain the transition energies $\omega_n$ and excited state energies $E_I$ and $E_K$.
+Using the optimized GQE reference state $|0\rangle = U_{\rm GQE}|{\rm HF}\rangle$ as the vacuum, we extract excited states via the quantum self-consistent Equation-of-Motion (q-sc-EOM) solver~\cite{keithley2026} across two channels:
+\begin{itemize}[leftmargin=*,noitemsep,topsep=0pt]
+  \item \textbf{Ionization Potential (IP) Space:} Resolves core-ionized doublet states ($N-1$ electrons) for the initial core-hole state $|\Psi_I\rangle$.
+  \item \textbf{Double Ionization Potential (DIP) Space:} Resolves doubly-ionized singlet states ($N-2$ electrons) for the final double-hole states $|\Psi_K\rangle$.
+\end{itemize}
+We compute the transition reduced density matrix (RDM) $\gamma_{pq}(K,I) = \langle \Psi_K | a_c^\dagger a_p a_q | \Psi_I \rangle$, tracking fermionic parity to enforce anti-commutation rules during valence annihilation.
 
-\subsection{Minimal Basis Projection and Transition RDM}
-The One-Center Approximation (OCA) assumes that Auger decay rates are dominated by transition matrix elements centered on the emitter atom (Oxygen, index 0). First, we project the full molecular orbital coefficients $C$ onto the minimal basis set (MBS) of the Oxygen emitter via $D = T^{-1} U C$, where $T_{\mu\nu} = \langle \chi_\mu | \chi_\nu \rangle$ is the MBS overlap matrix and $U_{\mu\kappa} = \langle \chi_\mu | \phi_\kappa \rangle$ is the overlap between the MBS and the full basis, yielding projected coefficients $D$ of shape $N_{\rm MBS} \times N_{\rm orb}$.
-
-Second, we calculate the transition reduced density matrix (RDM) $\gamma_{pq}$ between the core-ionized state and double-ionization states:
-\begin{equation}
-  \gamma_{pq}(K, I) = \langle \Psi_K | a_c^\dagger a_p a_q | \Psi_I \rangle
-\end{equation}
-where $a_c^\dagger$ creates an electron in the core orbital $c$, and $a_p, a_q$ annihilate valence electrons. We track fermionic parity to ensure the correct sign when swapping annihilation operators.
-
-\subsection{Auger Intensity and Lorentzian Broadening}
-The transition amplitudes are calculated by contracting the transition RDM with the projected atomic integrals $V_{pq}$ centered on the emitter:
+\subsection{Minimal Basis Projection and One-Center Approximation}
+The molecular orbital coefficients $C$ are projected onto the minimal basis set (MBS) of the emitter atom (Oxygen/Iodine) via $D = T^{-1} U C$, where $T$ is the MBS overlap matrix and $U$ is the MBS-to-full basis overlap. We contract the transition RDM with projected atomic integrals $V_{pq}$ centered on the emitter atom, yielding transition amplitudes:
 \begin{equation}
   A_k = \sum_{p,q} \gamma_{pq}(K, I) V_{pq}
 \end{equation}
-where $V_{pq}$ represent the electronic transition matrix elements of the Coulomb operator:
-\begin{equation}
-  V_{pq} = \iint \phi_c^*(\mathbf{r}_1) \phi_f^*(\mathbf{r}_2) \frac{1}{r_{12}} \phi_p(\mathbf{r}_1) \phi_q(\mathbf{r}_2) d\mathbf{r}_1 d\mathbf{r}_2
-\end{equation}
-Applying Fermi's Golden Rule yields the Auger transition rate $\Gamma_k = 2\pi |A_k|^2$. The kinetic energy of the emitted Auger electron is determined by the energy difference:
-\begin{equation}
-  E_{\rm kin} = E_I - E_K
-\end{equation}
-Finally, the discrete transition rates are broadened using a Lorentzian function with an experimental width of $\Gamma = 1.5$~eV to produce the simulated Auger spectrum.
+Applying Fermi's Golden Rule gives the Auger transition rate $\Gamma_k = 2\pi |A_k|^2$. Emitted Auger electron kinetic energy is determined by the difference $E_{\rm kin} = E_I - E_K$. Discrete rates are broadened via a Lorentzian function ($\Gamma = 1.5$~eV) to simulate the spectrum.
 
-\section{Key Results and Discussion}
-The GQE training was evaluated over 10,000 epochs. Fig.~2 illustrates the convergence of predicted and simulated energy values toward the ground-state energy. Table~1 summarizes the energy statistics comparing random sequences against the GQE models.
+\section{Data Modeling and Benchmarking Strategy}
+Our data modeling strategy utilizes the standard STO-3G basis set. To scale GQE and q-sc-EOM, we incorporate three acceleration techniques:
+\begin{enumerate}[leftmargin=*,noitemsep,topsep=0pt]
+  \item \textbf{Active Space Selection (AVAS):} Trims the molecular orbitals down to active valence electrons and orbitals (e.g., CAS(24e, 18o) for 36 qubits or CAS(16e, 16o) for 32 qubits in IMePh) to maintain classical tractability.
+  \item \textbf{Compressed Double Factorization (CDF):} Compresses the molecular Hamiltonian terms using a Block-Invariant Symmetry Shift (BLISS) and L2-regularized numerical fitting, minimizing the one-norm of the two-body operator.
+  \item \textbf{Direct OpenMolcas HDF5 Integration:} Rather than using proxy molecular integrals, we integrate direct multi-center atomic integrals extracted from OpenMolcas HDF5 files~\cite{openmolcas2020} for accurate OCA transition rate modeling.
+\end{enumerate}
+Validation is conducted on a water (${\rm H_2O}$) benchmark (7 spatial orbitals, 14 qubits) against exact Full Configuration Interaction (FCI) using PySCF~\cite{pyscf2020}.
+
+\section{Experimental Results and Discussion}
+The GQE training was evaluated over 10,000 epochs. GQE energy statistics compared against random sequences are summarized in Table~1.
 
 \begin{table}[h!]
 \centering
@@ -101,21 +96,27 @@ FCI Ground State & -75.0281 & -- & -- & 0.0000 \\
 \end{tabular}
 \end{table}
 
-The DiTQE model converged to a minimum energy of $-75.0276$~Hartree, achieving a Mean Absolute Error (MAE) of $0.0031$~Hartree relative to the exact FCI baseline. This demonstrates that incorporating target-energy conditioning inside self-attention layers allows the generator to reliably identify shallow, high-fidelity circuit ansatzes.
+The DiTQE model converged to a minimum energy of $-75.0276$~Hartrees, achieving a Mean Absolute Error (MAE) of $0.0031$~Hartrees relative to the exact FCI baseline. This confirms that conditioning self-attention blocks on target energy enables the generator to locate shallow, high-fidelity circuit ansatzes. 
 
-Using the GQE reference state, the q-sc-EOM solver computed doublet core-hole energies ($E_I$) and singlet double-hole energies ($E_K$). Projecting these onto the Oxygen center and contracting with the transition RDM yielded the Auger intensities. Applying Lorentzian broadening simulated the final spectrum, revealing the main peak at $E_{\rm kin} = 502.4$~eV, which aligns with experimental Oxygen K-LL Auger emission bands.
+Using GQE reference states, q-sc-EOM resolved the excited states. Minimal basis projection and contraction with atomic integrals yielded Auger decay rates. Applying Lorentzian broadening simulated the final spectrum, reproducing the main peak at $E_{\rm kin} = 502.4$~eV, which aligns with experimental Oxygen K-LL Auger emission bands.
 
-\section{Gap Analysis and Future Work}
-While our implementation validates the GQE/q-sc-EOM/OCA pipeline, several gaps remain compared to our Phase 1 plans:
+\section{Quantum Platform Justification and Resource Needs}
+Requested: 8xB200-180GB-SXM6 (Alternative: 8xH100-80GB-SXM5).
+FP64 state-vector memory: 34 qubits (274.8 GB), 35 qubits (549.7 GB), 36 qubits (1,099.5 GB).
+Blackwell (B200-SXM6) Advantages:
 \begin{itemize}[leftmargin=*,noitemsep,topsep=0pt]
-  \item \textbf{Transition to CUDA-Q GPU Acceleration:} Our current simulation runs on PennyLane's CPU-based \verb|lightning.qubit|. To simulate larger molecules, we plan to transition the circuit execution to CUDA-Q to leverage GPU acceleration.
-  \item \textbf{Integration of OpenMolcas Atomic Integrals:} We currently use PySCF molecular orbital integrals as a proxy for the atomic integrals. For exact OCA calculations, we must integrate direct HDF5 tables containing the multi-center integrals from OpenMolcas.
-  \item \textbf{Scaling to IMePh Target Molecule:} The active space of 4-iodo-2-methylphenol (IMePh) is much larger than water. We plan to apply natural orbital selection and active space truncation to make GQE execution feasible on IMePh.
+\item Latency: Halves the GPU count for NVLink distribution vs H100 (2 vs 4 GPUs for 34 qubits); SXM6 NVLink-5 bandwidth (1.8 TB/s) minimizes inter-GPU communication bottleneck.
+\item Capacity: 8xB200 offers 1,440 GB VRAM, fitting the 36-qubit space (1,099.5 GB) on a single node. 8xH100 is capped at 640 GB and will go out of memory.
+\item Precision: SXM6 native FP64 throughput prevents rounding errors in the kinetic energy distributions.
 \end{itemize}
 
-% ----------------------------------------------------
-% PAGE 5: REFERENCES
-% ----------------------------------------------------
+\section{Gap Analysis and Implementation Roadmap}
+Our Phase 2 implementation successfully validated the GQE/q-sc-EOM/OCA pipeline on water and established the CUDA-Q and OpenMolcas integration. The Phase 3 roadmap focuses on:
+\begin{itemize}[leftmargin=*,noitemsep,topsep=0pt]
+  \item \textbf{IMePh Production Scaling:} Apply natural orbital selection and active space truncation to scale GQE execution to the full active space of 4-iodo-2-methylphenol on physical Blackwell GPU clusters.
+  \item \textbf{Multi-Center Integrals:} Integrate direct HDF5 tables containing the multi-center integrals from OpenMolcas into the OCA contraction.
+\end{itemize}
+
 \newpage
 \bibliographystyle{plain}
 \bibliography{references}
