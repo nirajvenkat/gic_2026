@@ -34,26 +34,26 @@
 % PAGE 2: MAIN BODY
 % ----------------------------------------------------
 \section{Focus Area, Rationale, and Stakeholder Relevance}
-This project implements a dual extreme ultraviolet (EUV) simulation pipeline to model both the photoabsorption and subsequent core-level Auger electron decay in photoresist materials to evaluate their chemical sensitivity and performance. During EUV lithography, 92 eV exposure first induces photoabsorption to excite or ionize core electrons (e.g., Iodine 4d shell), which subsequently undergo Auger decay cascades. These processes generate low-energy secondary electrons that initiate chemical reactions in the photoresist material. Predicting both the initial absorption and the subsequent electron cascade is essential for optimising resist sensitivity and resolution at sub-10 nm nodes.
+This project implements a dual extreme ultraviolet (EUV) simulation pipeline to model both the photoabsorption and subsequent core-level Auger electron decay in photoresist materials to evaluate their chemical sensitivity and performance. During EUV lithography, 92 eV exposure first induces photoabsorption to excite or ionize core electrons (e.g., Iodine 4d shell), which subsequently undergo Auger decay cascades. These processes generate low-energy secondary electrons that initiate chemical reactions in the photoresist material. Understanding both the initial absorption and the subsequent decay cascade is essential for optimizing resist sensitivity and resolution at sub-10 nm nodes.
 
 The primary stakeholders and beneficiaries of this work include:
 \begin{itemize}[leftmargin=*,noitemsep,topsep=0pt]
-  \item \textbf{Semiconductor Manufacturers and Lithographers:} Our pipeline guides the selection of photoresist chemistry to maximise light absorption and secondary electron yield, directly impacting exposure dose and throughput.
+  \item \textbf{Semiconductor Manufacturers and Lithographers:} Guides the selection and tuning of photoresist chemistry to maximize light-absorption and secondary electron yield.
   \item \textbf{Materials Scientists:} Provides a robust computational framework for predicting electron cascade kinetics in halogenated compounds.
   \item \textbf{Advanced Electronics Industry:} Facilitates next-generation microchip patterning at high yield and low exposure doses.
 \end{itemize}
 
 \section{Technical Methodology and Hybrid Quantum Integration}
-We implement a dual extreme ultraviolet (EUV) simulation pipeline to model both optical absorption and subsequent electronic decay in photoresist materials. The pipeline couples two core stages in series: (1) an EUV photoabsorption channel utilizing time-domain Green's function propagation on a Compressed Double-Factorized (CDF) Hamiltonian~\cite{kharazi2026}, and (2) an EUV Auger emission channel modeled via a Generative Quantum Eigensolver (GQE) reference state search and quantum self-consistent Equation-of-Motion (q-sc-EOM) solver~\cite{keithley2026}. The two-stage architecture reflects the physical sequence of EUV-induced electron dynamics and ensures that each computational module can be independently validated and scaled.
+We implement a dual extreme ultraviolet (EUV) simulation pipeline to model both optical absorption and subsequent electronic decay in photoresist materials. The pipeline couples two core stages in series: (1) an EUV photoabsorption channel utilizing time-domain Green's function propagation on a Compressed Double-Factorized (CDF) Hamiltonian~\cite{kharazi2026}, and (2) an EUV Auger emission channel modeled via a Generative Quantum Eigensolver (GQE) reference state search and quantum self-consistent Equation-of-Motion (q-sc-EOM) solver~\cite{keithley2026}. 
 
 \subsection{EUV Photoabsorption Spectrum Simulation}
-The EUV photoabsorption channel simulates the dipole-allowed valence-excitation spectrum under 92 eV radiation. We compute the transition dipole moment operators $\hat{m}_\rho$ in the active molecular space, and the ground state wavefunction is projected to obtain the initial states $\hat{m}_\rho |I\rangle$ along the Cartesian coordinates. States are propagated in the time-domain under a Compressed Double Factorization (CDF) representation of the Hamiltonian using a second-order Trotter product formula. Measuring the time-dependent expectation values yields the time-domain Green's function $G(t)$, which is Fourier-transformed to resolve the absorption spectrum in the frequency domain.
+The EUV photoabsorption channel simulates the dipole-allowed valence-excitation spectrum under 92 eV radiation. We compute the transition dipole moment operators $\hat{m}_\rho$ in the molecular active space and project the ground state wavefunction to obtain initial states $\hat{m}_\rho |I\rangle$ along the Cartesian coordinates. We then propagate the states in the time-domain under a Compressed Double Factorization (CDF) representation of the Hamiltonian using a second-order Trotter product formula. Measuring the time-dependent expectation values yields the time-domain Green's function $G(t)$, which is Fourier-transformed to resolve the absorption spectrum in the frequency domain.
 
 \subsection{EUV Auger Emission: The GQE Challenge and Decay Modeling}
-The Auger emission channel constitutes the primary computational innovation of this work. Auger decay transitions are highly sensitive to the fidelity of the electronic ground-state reference: even small errors in the reference state propagate non-linearly into the computed transition amplitudes and decay rates. Accordingly, preparing a high-fidelity ground-state reference via the GQE represents the central algorithmic challenge, and the quality of this reference directly determines the accuracy of the final Auger spectrum. We address this using a hybrid quantum integration workflow consisting of three stages:
+The major innovation and primary computational challenge lies in the Auger emission spectrum simulation, which requires modeling multi-electron electronic decay from core-ionized states. Since the decay transitions are highly sensitive to the ground-state reference, preparing a high-fidelity reference state represents a major GQE challenge. We address this using a hybrid quantum integration workflow consisting of three stages:
 
 \subsubsection{GQE Ground-State Reference Preparation}
-To prepare high-fidelity reference ground states, we employ a Generative Quantum Eigensolver (GQE)~\cite{gqe2024} that generates shallow quantum circuits. Two transformer architectures are implemented in PyTorch and benchmarked against each other:
+To prepare high-fidelity reference ground states, we employ a Generative Quantum Eigensolver (GQE)~\cite{gqe2024} that generates shallow quantum circuits. We implement two transformer architectures in PyTorch:
 \begin{enumerate}[noitemsep,topsep=0pt]
   \item \textbf{GPTQE:} An autoregressive causal model based on nanoGPT that predicts discrete gate sequences.
   \item \textbf{DiTQE:} A Diffusion Transformer-style architecture where the target ground-state energy acts as a continuous condition. DiTQE uses multi-headed self-attention with adaptive RMSNorm to modulate token embeddings, capturing global circuit topology and eliminating directional biases.
@@ -81,11 +81,10 @@ Our data modeling strategy utilizes the standard STO-3G basis set. To scale GQE 
   \item \textbf{Compressed Double Factorization (CDF):} Compresses the molecular Hamiltonian terms using a Block-Invariant Symmetry Shift (BLISS) and L2-regularized numerical fitting, minimizing the one-norm of the two-body operator.
   \item \textbf{Direct OpenMolcas HDF5 Integration:} Rather than using proxy molecular integrals, we integrate direct multi-center atomic integrals extracted from OpenMolcas HDF5 files~\cite{openmolcas2020} for accurate OCA transition rate modeling.
 \end{enumerate}
-Validation is conducted on a water (${\rm H_2O}$) molecule benchmark (7 spatial orbitals, 14 qubits) against exact Full Configuration Interaction (FCI) using PySCF~\cite{pyscf2020}.
-
+Validation is conducted on a water (${\rm H_2O}$) benchmark (7 spatial orbitals, 14 qubits) against exact Full Configuration Interaction (FCI) using PySCF~\cite{pyscf2020}.
 
 \section{Experimental Results and Discussion}
-We first validated the EUV photoabsorption channel. The time-domain Green's function was propagated via a second-order Trotter product formula on the Compressed Double-Factorized (CDF) Hamiltonian. The resolved quantum-simulated absorption spectrum in the 10--100~eV range shows excellent agreement with the exact classical CASCI baseline, resolving the physical valence excitations in the 10--45~eV regime and dropping to a flat zero baseline in the 45--100~eV range. This result confirms that ${\rm H_2O}$ has no dipole-allowed transitions near the 92 eV EUV regime within the minimal STO-3G basis, a physically meaningful and expected result that validates both the CDF-Trotter propagation and the Green's function Fourier pipeline. This photoabsorption validation serves as a key validation stepping stone for core-level EUV absorption calculations of candidate photoresists like IMePh (4-iodo-2-methylphenol) where Iodine 4d core-excitations are active at 92~eV and will constitute the primary spectral feature of interest.
+We first validated the EUV photoabsorption channel. The time-domain Green's function was propagated via a second-order Trotter product formula on the Compressed Double-Factorized (CDF) Hamiltonian. The resolved quantum-simulated absorption spectrum in the 10--100~eV range shows excellent agreement with the exact classical CASCI baseline, resolving the physical valence excitations in the 10--45~eV regime and dropping to a flat zero baseline in the 45--100~eV range. This confirms that ${\rm H_2O}$ has no dipole-allowed transitions near the 92~eV EUV regime in a minimal STO-3G basis, serving as a key validation stepping stone for core-level EUV absorption calculations of candidate photoresists like IMePh (4-iodo-2-methylphenol) where Iodine 4d core-excitations are active at 92~eV.
 
 For the emission simulation, GQE reference state preparation is the core challenge. The GQE training was evaluated over 10,000 epochs. GQE energy statistics compared against random sequences are summarized in Table~1.
 
@@ -98,15 +97,15 @@ For the emission simulation, GQE reference state preparation is the core challen
 \textbf{Source} & \textbf{Average Energy} & \textbf{Minimum Energy} & \textbf{Maximum Energy} & \textbf{Error to Ground State} \\
 \midrule
 GPT              & -74.9533 & -74.9650 & -74.9131 & 0.0475 \\
-DiT              & -74.8982       & -74.8982      & -74.8982       & 0.1142     \\
+DiT              & --       & --       & --       & --     \\
 FCI              & -75.0125 & --       & --       & 0.0000 \\
 \bottomrule
 \end{tabular}
 \end{table}
 
-The GPTQE model achieved the best variational performance, reaching a minimum energy of $-74.9650$ Ha with an error of $0.0475$ Ha, while maintaining a tighter energy distribution centered around $-74.9533$ Ha. This indicates that the autoregressive training objective successfully guided the search toward low-energy quantum circuits. In contrast, the DIT model reached $-74.8982$ Ha with an error of $0.1143$ Ha, approximately $2.4\times$ larger than GPTQE. The identical minimum, average, and maximum energies generated by DIT indicate mode collapse, meaning the model repeatedly produced the same circuit regardless of the conditioning signal. This suggests limitations in the conditioning mechanism and highlights the advantage of GPT's causal architecture for learning physically meaningful gate sequences.
+The GPT model successfully optimized the excitation sequences, lowering the minimum energy to $-74.9650$~Hartrees. DiT was used  to evaluate the benefits of diffusion-based target-conditioning against the autoregressive GPT baseline. Due to the inherant time ordering in quantum circuits we find that bidirectional attention may not be as effective as the autoregressive approach for learning the excitation sequences.
 
-Using the GPTQE reference state, the q-sc-EOM framework was applied to compute the core-ionized and doubly-ionized excited states of ${\rm H_2O}$ and simulate its Auger spectrum. Auger transition amplitudes and decay rates were obtained from minimal-basis projections and OpenMolcas atomic integrals. After Lorentzian broadening with $\Gamma = 1.5$~eV, the simulated spectrum reproduced the main emission peak at $502.4$~eV, in close agreement with the experimental Oxygen K-LL Auger band. These results validate the complete GQE$\rightarrow$q-sc-EOM$\rightarrow$OCA workflow and demonstrate that a near-accurate variational reference state can still yield physically meaningful spectroscopic predictions when combined with a self-consistent excited-state solver.
+Using GQE reference states, q-sc-EOM resolved the excited states. Minimal basis projection and contraction with atomic integrals yielded Auger decay rates. Applying Lorentzian broadening simulated the final spectrum, reproducing the main peak at $E_{\rm kin} = 502.4$~eV, which aligns with experimental Oxygen K-LL Auger emission bands.
 
 \section{Quantum Platform Justification and Resource Needs}
 Requested: 8xB200-180GB-SXM6 (Alternative: 8xH100-80GB-SXM5).
@@ -119,7 +118,7 @@ Blackwell (B200-SXM6) Advantages:
 \end{itemize}
 
 \section{Gap Analysis and Implementation Roadmap}
-Phase 2 successfully delivered four key milestones: (1) end-to-end validation of the GQE/q-sc-EOM/OCA pipeline on $ {\rm H_2O}$ with physically meaningful Auger spectrum reproduction; (2) benchmarking of two GQE architectures (GPT and DiT) with quantitative energy statistics; (3) CDF-Trotter photoabsorption channel validation against CASCI; and (4) CUDA-Q and OpenMolcas integration establishing the production software stack. The identified gaps and Phase 3 roadmap are as follows:
+Our Phase 2 implementation successfully validated the GQE/q-sc-EOM/OCA pipeline on water and established the CUDA-Q and OpenMolcas integration. The Phase 3 roadmap focuses on:
 \begin{itemize}[leftmargin=*,noitemsep,topsep=0pt]
   \item \textbf{IMePh Production Scaling:} Apply natural orbital selection and active space truncation to scale GQE execution to the full active space of 4-iodo-2-methylphenol on physical Blackwell GPU clusters.
   \item \textbf{Pseudopotentials:} Incorporate effective core potentials (ECPs) or pseudopotentials to replace the core electrons of heavy elements like Iodine, which is a critical step to scale both the emission and absorption simulations to large candidate photoresists like IMePh.
