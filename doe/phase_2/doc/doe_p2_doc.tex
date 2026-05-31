@@ -44,11 +44,11 @@ The primary stakeholders and beneficiaries of this methodology include:
 \end{itemize}
 
 \section{Technical Methodology and Hybrid Quantum Integration}
-In our \textbf{first} notebook, we show a hybrid approach based on Quantum Approximate Multi-Objective Optimization (QAMOO) by~\cite{qamoo2025} combined with classical Benders decomposition for strategic siting of energy storage and microgrids. We evaluate an IEEE-33 bus considering 3 objectives inspired by~\cite{multiverse2023} into the following optimization problem:
-$$
-\min \quad C(\overline{x}) = \lambda_{\rm I} C_{\rm I} + \lambda_{\rm R} C_{\rm R} - \lambda_{\rm VC} C_{\rm VC}
-$$
-where $C_{\rm I}$ is the capital investment cost of siting the microgrid assets, $C_{\rm R}$ is the resilience of the grid under various contingency scenarios, and $C_{\rm VC}$ is the voltage control quality of the grid under various load conditions. The architecture partition divides the optimization into a classical Master Problem (MP) and an AC power-flow Subproblem (SP), aligning with Benders principles~\cite{pasqal2024}. 
+In our \textbf{first} notebook, we run a hybrid Benders-QAMOO workflow on IEEE-33 bus. Our approach combines Quantum Approximate Multi-Objective Optimization (QAMOO) by~\cite{qamoo2025} with classical Benders decomposition for strategic siting of energy storage and microgrids. Our hybrid workflow is inspired by ~\cite{pasqal2024}, but with a different architecture partition: it divides the optimization into a classical Master Problem (MP) and an AC power-flow Subproblem (SP).
+At its core, this is formulated as a mixed-integer linear programming (MILP) optimization problem, which is loaded into a Qiskit QuadraticProgram. We jointly optimize the following objectives inspired by~\cite{multiverse2023}: $C_{\rm I}$: capital investment cost of siting the microgrid assets, $C_{\rm R}$: resilience of the grid, and $C_{\rm VC}$: voltage control quality. This takes the following minimization:
+$
+\min_{\overline{x} \in \{0,1\}^N} \quad C(\overline{x}) = \lambda_{\rm I} C_{\rm I} + \lambda_{\rm R} C_{\rm R} - \lambda_{\rm VC} C_{\rm VC}
+$
 
 In our \textbf{second} notebook, we execute a QAOA pipeline against non-linear structural shocks, we stress-tested  IEEE 39 bus across two severe grid-modernization scenarios: an additive load injection model simulating hyperscale AI data centers, and an exhaustive contingency sweep across all 46 transmission lines.
 
@@ -73,20 +73,17 @@ To overcome physical device noise, we have implemented and integrated the client
 We implement an additive load framework simulating hyperscale AI campus deployment by injecting independent point-source demands (+300 MW / +90 MVAr) directly onto two buses. We track voltage boundary violations across the network. When nominal asset allocations fail, the pipeline dynamically reallocates storage assets to the newly vulnerable corridor to support the local voltage floor.
 
 Additionally, we model cost penalties with an empirical resilience metric (replacing $C_{\rm I}$ for $C_{\text{resilience}}$). We model this by simulating a complete outage tree by sequentially taking all 46 lines out of service. Non-linear grid stability responses under each failure are compiled into a per-bus resilience sensitivity index ($R_n$). This index mutates the self-loop diagonals of the optimization QUBO as follows:
-$$Q_{i,i} = -\alpha V_n[i] + \mu r_n[i] - \nu R_n[i] + \lambda(1 - 2K)$$
-Doing so biases the quantum energy landscape toward robust topologies.
+$Q_{i,i} = -\alpha V_n[i] + \mu r_n[i] - \nu R_n[i] + \lambda(1 - 2K)$
 
 \section{Data Modeling and Benchmarking Strategy}
-Our data modeling strategy utilizes the standard IEEE 33-bus radial distribution system, a public and reproducible test grid. The model incorporates candidate sets for microgrid and storage asset placement across all buses under localized loads and weather-driven outage scenarios. 
-
-To validate the quantum optimization performance, we benchmark Benders-QAMOO against two exact classical methods:
+We primarily focus on IEEE datasets. Benders-QAMOO is benchmarked against two exact classical methods:
 \begin{enumerate}[leftmargin=*,noitemsep,topsep=0pt]
-  \item \textbf{CPLEX Weighted-Sum:} An exact classical solver executing scalarized mixed-integer linear programming (MILP) evaluations.
-  \item \textbf{Defining Point Algorithm (DPA):} An exact, state-of-the-art multi-objective MILP algorithm. The quadratic terms are linearized by introducing auxiliary variables $z_{uv} = x_u x_v$ and solved using epsilon-constraints.
+  \item \textbf{CPLEX Weighted-Sum:} Classical solver executing scalarized MILP evaluations.
+  \item \textbf{Defining Point Algorithm (DPA):} State-of-the-art MILP algorithm with provable convergence.
 \end{enumerate}
 
 \section{Experimental Results and Discussion}
-\underline{First Notebook:} The evaluation measures key multi-objective optimization metrics over the simulated runs: Pareto front size ($|{\rm PF}|$), Hypervolume (${\rm HV}$), Inverted Generational Distance (${\rm IGD}$), spacing, additive epsilon indicator ($\epsilon^+$), and coverage ($C(A,B)$). The results on the IEEE 33-bus system are summarized in Table~1.
+\underline{First Notebook:} Table 1 measures key multi-objective optimization metrics: Pareto front size ($|{\rm PF}|$), Hypervolume (${\rm HV}$), Inverted Generational Distance (${\rm IGD}$), spacing, additive epsilon indicator ($\epsilon^+$), and coverage ($C(A,B)$).
 
 \begin{table}[h!]
 \centering
@@ -94,23 +91,23 @@ To validate the quantum optimization performance, we benchmark Benders-QAMOO aga
 \vspace{0.5em}
 \begin{tabular}{lccccccc}
 \toprule
-\textbf{Method} & $|{\rm PF}|$ & \textbf{HV} & \textbf{IGD} & \textbf{Spacing} & $\epsilon^+$ & \multicolumn{2}{c}{\textbf{Coverage}} \\
+\textbf{Method} & |\textbf{PF}| & \textbf{HV} & \textbf{IGD} & \textbf{Spacing} & $\epsilon^+$ & \multicolumn{2}{c}{\textbf{Coverage}} \\
 \cmidrule(lr){7-8}
 & & & & & & $C(A,B)$ & $C(B,A)$ \\
 \midrule
-QAMOO (Quantum) & 4 & 6.2512 & 28.3398 & 2.2204 & 24.5017 & 0.0000 & 1.0000 \\
-Benders-QAMOO & 2 & 71.1870 & 25.8634 & 0.0000 & 22.9644 & 0.0000 & 1.0000 \\
-CPLEX (Exact Classical WS) & 1 & 3634.3192 & 0.2829 & N/A & 0.3341 & 0.5000 & 1.0000 \\
-DPA (Exact Classical) & 1 & 3700.4377 & 0.2829 & N/A & 0.3901 & 0.5000 & 1.0000 \\
+QAMOO (Quantum)            & 189 & 707.2790 & 0.0961 & 0.3724 & 0.0588 & 0.5455 & 0.0529 \\
+Benders-QAMOO (Quantum)    & 270 & 824.3916 & 0.1097 & 0.2613 & 0.0714 & 0.4697 & 0.0333 \\
+CPLEX (Exact Classical WS) & 9   & 47.6514  & 0.1466 & 0.1560 & 0.2569 & 0.1818 & 1.0000 \\
+DPA (Exact Classical)      & 57  & 49.1532  & 0.0001 & 0.0665 & 0.0004 & 0.8636 & 1.0000 \\
 \bottomrule
 \end{tabular}
 \end{table}
 
-% The results show that integrating Benders cuts as static QUBO penalties dramatically improves quantum optimization. Benders-QAMOO achieved a hypervolume of $71.1870$ (compared to $6.2512$ for native QAMOO), reduced the IGD from $28.3398$ to $25.8634$, and improved the additive epsilon indicator $\epsilon^+$ from $24.5017$ to $22.9644$. 
+The empirical metrics reveal a stark architectural trade-off between quantum exploration and classical precision. The quantum models demonstrate massive dominance in exploring non-dominated design spaces, with Benders-QAMOO producing a Pareto front of size $|{\rm PF}| = 270$. This dense coverage yields an order-of-magnitude superiority in Hypervolume (HV), where Benders-QAMOO secures the highest score of 824.3916.
 
-% Note that the exact classical benchmarks (CPLEX and DPA) collapse to a single Pareto point ($|{\rm PF}| = 1$). This is a direct mathematical consequence of the IEEE 33-bus system grid topology being a radial network (a tree graph). Since tree graphs are bipartite, a single bipartition configuration (and its complement) cuts every edge in the graph. Under a pure Max-Cut QUBO formulation, this bipartition simultaneously maximizes all three objectives, removing any trade-offs from the exact Pareto front. Similarly, because $|{\rm PF}| = 1$ for the exact methods, their spacing is mathematically undefined (${\rm N/A}$), whereas Benders-QAMOO with $|{\rm PF}| = 2$ has a spacing of $0.0000$ due to identical symmetric pairwise distances.
+Conversely, the exact classical solvers establish the absolute mathematical baseline for convergence at the expense of frontier diversity. The DPA anchors the true reference front, achieving a near-zero IGD of $0.0001$, a minimal Spacing of $0.0665$, and a near-perfect additive epsilon indicator ($\epsilon^+$) of $0.0004$. This mathematical precision is validated by the asymmetric Coverage indicators, where the exact classical sets achieve a absolute coverage ($C(B,A) = 1.0000$).
 
-\underline{Second Notebook:} The warm-start QAOA pipeline ($p=2$ layers) successfully navigated the non-linear shock landscapes. Under the 600 MW collective AI data center surge, the quantum optimizer executed a 100\% asset reallocation shift from buses [8, 15] to [4, 10, 11, 12, 18], maintaining the absolute voltage floor safely above the critical 0.95 p.u. engineering limit within a stable [0.9666, 1.0636] p.u. operating envelope.  Across the full $N-1$ contingency tree, the resilience-aware QAOA successfully bypassed classical greedy traps and minimized global continuous voltage deviations to a tight mean $|\Delta V|$ of 0.02705 p.u.~across all valid outage conditions.
+\underline{Second Notebook:} The warm-start QAOA pipeline ($p=2$ layers) successfully navigated the non-linear shock landscapes. Under the 600 MW collective AI data center surge, the quantum optimizer executed a 100\% asset reallocation shift from buses [8, 15] to [4, 10, 11, 12, 18], maintaining the absolute voltage floor safely above the critical 0.95 p.u. engineering limit.  Across the full $N-1$ contingency tree, the resilience-aware QAOA successfully minimized global continuous voltage deviations to a tight mean $|\Delta V|$ of 0.02705 p.u.~across all valid outage conditions.
 
 \section{Quantum Platform Justification and Resource Needs}
 \textbf{Requested:} 156-qubit Heron-class QPUs (e.g., Kingston, Fez) (Inferior alternative: 120-qubit Eagle-class).\\
