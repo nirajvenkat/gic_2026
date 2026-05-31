@@ -51,9 +51,9 @@ def prepare_qaoa_circuits(config: QAOAConfig, backend, overwrite_results=False):
     from qiskit_optimization.converters import QuadraticProgramToQubo
     from qamoo.utils.transpilation import linearize_qps
     
-    # We use a standard soft-penalty lambda weight (e.g. LAMBDA = 2.0 or from problem specs if we want, or default)
-    # Let's use 2.0 as penalty since it matches both the paper and the IEEE-33 runtime.
-    conv = QuadraticProgramToQubo(penalty=2.0)
+    # Penalty must be large enough to enforce budget constraints in the QUBO.
+    # With 22+ variables, penalty=2.0 is too weak; 10.0 ensures sum(x)==K is respected.
+    conv = QuadraticProgramToQubo(penalty=10.0)
     
     objective_weights = config.objective_weights
     isings = []

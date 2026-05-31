@@ -12,6 +12,7 @@
 
 # %% [markdown]
 # # Warm-Start QAOA, Scaling for AI and N-1 Resilience
+# **Team Name:** Entangled Trio
 
 # %% [markdown]
 # DOE GIC 2026 — Phase 2 
@@ -40,6 +41,10 @@
 #   6. Run warm-start QAOA (QAOAAnsatz + COBYLA) with StatevectorSampler
 #   7. Decode best bitstring; validate with pandapower
 #   8. Classical greedy baseline for comparison
+
+# %% [markdown]
+# ![hybrid](../../img/hybrid_architecture.png)
+
 
 # %% [markdown]
 # Libraries:
@@ -1326,6 +1331,8 @@ lp_size = linprog(
 
 q_optimal = lp_size.x if lp_size.success else np.full(k, MVAR_BUDGET / k)
 q_uniform  = np.full(k, MVAR_BUDGET / k)      # baseline: equal split
+wb_o = float(np.dot(sel_vn, q_optimal))
+wb_u = float(np.dot(sel_vn, q_uniform))
 
 print(f"\n  Sizing LP {'converged' if lp_size.success else 'FAILED — using uniform fallback'}.")
 print(f"\n  {'Bus':>4}  {'V_n':>8}  {'r_n':>8}  {'q_uniform (MVAr)':>18}  {'q_optimal (MVAr)':>18}  {'Cost ($M)':>10}")
@@ -1687,8 +1694,8 @@ ax.legend(handles=legend_items, loc='lower left', fontsize=8,
           bbox_to_anchor=(0.01, 0.01))
 
 plt.tight_layout()
-plt.savefig('hybrid_architecture.png', dpi=150, bbox_inches='tight',
-            facecolor=fig.get_facecolor())
+# plt.savefig('hybrid_architecture.png', dpi=150, bbox_inches='tight',
+#             facecolor=fig.get_facecolor())
 plt.show()
 print('\n✓ Diagram saved: hybrid_architecture.png')
 print('  Include this figure in your 3-page DOE PDF submission.')

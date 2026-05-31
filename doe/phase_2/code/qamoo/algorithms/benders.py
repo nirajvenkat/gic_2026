@@ -33,13 +33,15 @@ def _load_problem_graphs(num_qubits: int, problem_dir: str, num_objectives: int)
     return graphs
 
 
-def _evaluate_subproblem_pandapower(x: List[int], net=None, selected_vm_pu_limits=(0.95, 1.05)) -> Tuple[bool, dict]:
+def _evaluate_subproblem_pandapower(x: List[int], net=None, candidate_buses: List[int] = None, selected_vm_pu_limits=(0.95, 1.05)) -> Tuple[bool, dict]:
     """Evaluate AC feasibility with pandapower and return diagnostic cuts.
 
     - `x` is a binary list indicating placement of microgrid/storage at buses.
     - `net` is an optional pandapower network instance to use; if not
       provided, this function will not run a powerflow and will return a
       conservative infeasible diagnostic.
+    - `candidate_buses` maps decision variable index to actual bus number.
+      If None, variable index is used directly as the bus number.
 
     Returns (feasible: bool, diagnostics: dict).
     If infeasible, diagnostics contains a list of `cuts`, each a dict with keys:
@@ -73,12 +75,10 @@ def _evaluate_subproblem_pandapower(x: List[int], net=None, selected_vm_pu_limit
     created_gens = []
     for i, bit in enumerate(x):
         if bit:
-            # If bus indices in the net are not zero-based sequential, we assume
-            # they align with x ordering used elsewhere in the repo (mapping
-            # done at problem construction). If mismatch occurs, caller should
-            # provide a net whose bus ordering matches `x`.
+            # Map variable index to actual bus number
+            bus = candidate_buses[i] if candidate_buses is not None else i
             try:
-                pp.create_gen(net_copy, bus=i, p_mw=gen_p_mw, vm_pu=1.0, name=f"benders_gen_{i}")
+                pp.create_gen(net_copy, bus=bus, p_mw=gen_p_mw, vm_pu=1.0, name=f"benders_gen_{i}")
                 created_gens.append(i)
             except Exception:
                 # bus may not exist or create_gen not available for this net
@@ -173,8 +173,8 @@ def _apply_cuts_to_master(mdl: "Model", x_vars: List, cuts: List[dict]):
 def classical_benders(num_qubits: int, problem_dir: str, num_objectives: int, max_iters: int = 20):
     """A simple classical Benders loop.
 
-    - master: binary siting variables
-    - subproblem: placeholder feasibility check (replaceable)
+    - master: binary siting variables with real objectives and budget constraint
+    - subproblem: AC feasibility check via pandapower (when available)
 
     Returns: dict with keys `cuts` (list), `last_solution` (list)
     """
@@ -183,13 +183,41 @@ def classical_benders(num_qubits: int, problem_dir: str, num_objectives: int, ma
 
     graphs = _load_problem_graphs(num_qubits, problem_dir, num_objectives)
 
+    # Load QP objectives for problem-aware master
+    import pickle
+    qps = []
+    for obj_idx in range(num_objectives):
+        qp_path = os.path.join(problem_dir, f'problem_qp_{obj_idx}.pkl')
+        if os.path.exists(qp_path):
+            with open(qp_path, 'rb') as f:
+                qps.append(pickle.load(f))
+
     mdl = Model(name="benders_master")
     x = mdl.binary_var_list(num_qubits, name="x")
 
-    # Objective: simple random weighted-sum (placeholder)
-    rng = np.random.default_rng(42)
-    weights = rng.random(num_qubits)
-    mdl.maximize(mdl.sum(weights[i] * x[i] for i in range(num_qubits)))
+    # Add budget constraint from the first QP (all QPs share the same constraint)
+    if qps:
+        for cstr in qps[0].linear_constraints:
+            expr = mdl.sum(coef * x[int(idx)] for idx, coef in cstr.linear.to_dict().items())
+            if cstr.sense.name == "LE":
+                mdl.add_constraint(expr <= cstr.rhs)
+            elif cstr.sense.name == "GE":
+                mdl.add_constraint(expr >= cstr.rhs)
+            elif cstr.sense.name == "EQ":
+                mdl.add_constraint(expr == cstr.rhs)
+
+    # Objective: equal-weighted scalarized sum of all QP objectives (minimization)
+    if qps:
+        obj_expr = 0
+        for qp in qps:
+            for idx, val in qp.objective.linear.to_dict().items():
+                obj_expr += (val / num_objectives) * x[int(idx)]
+        mdl.minimize(obj_expr)
+    else:
+        # Fallback to random weights if no QPs available
+        rng = np.random.default_rng(42)
+        weights = rng.random(num_qubits)
+        mdl.maximize(mdl.sum(weights[i] * x[i] for i in range(num_qubits)))
 
     cuts = []
 
@@ -197,7 +225,7 @@ def classical_benders(num_qubits: int, problem_dir: str, num_objectives: int, ma
     try:
         import pandapower as pp
         # The caller should supply a network consistent with the problem; here
-        # we try to load a net file if one exists at problem_dir/net.json (optional)
+        # we try to load a net file if one exists at problem_dir/net.pickle (optional)
         netfile = os.path.join(problem_dir, "net.pickle")
         if os.path.exists(netfile):
             net = pp.from_pickle(netfile)
@@ -236,19 +264,29 @@ def classical_benders(num_qubits: int, problem_dir: str, num_objectives: int, ma
 
 
 def cut_to_qubo_penalty(cut: dict, num_qubits: int, penalty_weight: float = 10.0) -> np.ndarray:
-    """Convert a simple forbid-vector cut into a linear penalty vector for QUBO.
+    """Convert a Benders feasibility cut into a linear penalty vector for QUBO.
 
-    For a cut that forbids an exact binary vector `v`, we return a vector `p` of
-    length `num_qubits` such that adding -p_i * x_i (or +p_i depending on
-    objective sign) encourages the sampler away from the forbidden vector.
+    Handles all cut types produced by `classical_benders()`:
+      - Cuts with `coeff` dict: apply penalty_weight * coeff[i] to variable i
+      - Legacy `forbid_vector` cuts: penalise matching bits
 
-    This is a heuristic; a proper translation would produce a quadratic penalty
-    term representing (1 - I(v,x)) or a squared hinge as used in the design.
+    Returns a vector `p` of length `num_qubits`. Adding p[i] to the QUBO
+    diagonal discourages the sampler from selecting the penalised variables.
     """
     p = np.zeros(num_qubits, dtype=float)
+
+    # Handle cuts with explicit coefficient dictionaries (all standard cut types)
+    coeff = cut.get("coeff", {})
+    if coeff:
+        for idx_str, c in coeff.items():
+            idx = int(idx_str)
+            if 0 <= idx < num_qubits:
+                p[idx] += penalty_weight * c
+        return p
+
+    # Legacy: forbid_vector type
     if cut.get("type") == "forbid_vector":
         v = np.array(cut.get("vec", [0] * num_qubits), dtype=int)
-        # Encourage fewer agreements with v by placing weight on matching bits
-        # p_i = penalty_weight if v_i == 1 else 0
         p = penalty_weight * v.astype(float)
+
     return p

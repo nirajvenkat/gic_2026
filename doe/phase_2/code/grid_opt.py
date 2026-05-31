@@ -29,12 +29,18 @@
 # # Quantum-Enhanced Strategic Siting of Energy Storage and Microgrids
 # **Team Name:** Entangled Trio
 #
-# This notebook demonstrates the QAMOO-based multi-objective optimization for strategic siting of energy storage and microgrids. We evaluate this over a Pandapower grid (e.g., IEEE-33) considering 3 objectives:
-# 1. **Resilience / Reliability ($C_R$)**
-# 2. **Capital Investment ($C_I$)**
-# 3. **Voltage-Control Quality ($C_{VC}$)**
+# This notebook demonstrates our approach based on Quantum Approximate Multi-Objective Optimization (QAMOO) by [Kotil et al.](https://doi.org/10.1038/s43588-025-00873-y) combined with classical Benders decomposition for strategic siting of energy storage and microgrids. We evaluate this over a Pandapower grid (e.g., IEEE-33 bus) considering 3 objectives inspired by [Multiverse Computing](https://doi.org/10.36227/techrxiv.175502655.52172592/v1):
+# 1. **Resilience / Reliability ($C_{\rm R}$)**
+# 2. **Capital Investment ($C_{\rm I}$)**
+# 3. **Voltage-Control Quality ($C_{\rm VC}$)**
 #
-# We formulate our multi-objective QUBOs using Qiskit's `Maxcut` mapper. Since QAMOO natively integrates with the `Maxcut` class to construct the underlying Ising operators from graph objects, this mapping provides a direct, mathematically equivalent translation of our quadratic objective functions without overhead.
+# We formulate our multi-objective QUBOs natively using `QuadraticProgram` in Qiskit, this mapping provides a direct translation into our classical validation layer that runs IBM CPLEX and the state-of-the-art Defining Point Algorithm (DPA). For runs involving IBM QPUs, we have implemented the Samplomatic error mitigation pipeline.
+
+# %% [markdown]
+# Here is a diagram that illustrates the Benders-QAMOO workflow:
+
+# %% [markdown]
+# ![bq](benders_qamoo.png)
 
 # %%
 # %matplotlib inline
@@ -195,13 +201,13 @@ def _train_qaoa_parameters(problem_folder: str, p_layers: int, num_objectives: i
     c_vals = [1.0 / num_objectives] * num_objectives
     qp_lin = linearize_qps(qps, c_vals)
 
-    conv = QuadraticProgramToQubo(penalty=2.0)
+    conv = QuadraticProgramToQubo(penalty=10.0)
     qubo = conv.convert(qp_lin)
     ising, _ = qubo.to_ising()
 
     ansatz = QAOAAnsatz(ising, reps=p_layers)
     estimator = AerEstimator(
-        backend_options={"method": "matrix_product_state", "matrix_product_state_max_bond_dimension": 20},
+        backend_options={"method": "matrix_product_state", "matrix_product_state_max_bond_dimension": 64},
         run_options={"shots": 1024},
     )
 
@@ -229,7 +235,7 @@ def _run_qamoo_workflow(data_root: str, run_id: str, num_qubits: int, num_object
         backend = service.least_busy(min_num_qubits=num_qubits, simulator=False, operational=True)
         print(f"Using QPU backend: {backend.name}")
     else:
-        backend = AerSimulator(method='matrix_product_state', matrix_product_state_max_bond_dimension=20, max_parallel_threads=1)
+        backend = AerSimulator(method='matrix_product_state', matrix_product_state_max_bond_dimension=64, max_parallel_threads=1)
         backend.options.use_fractional_gates = False
 
     problem = ProblemSpecification()
@@ -293,9 +299,9 @@ SAMPLOMATIC_METHODS = []
 # %%
 # Load selected system
 if GRID_CASE == "IEEE-33":
-    net = nw.case14()
-elif GRID_CASE == "IEEE-14":
     net = nw.case33bw()
+elif GRID_CASE == "IEEE-14":
+    net = nw.case14()
 elif GRID_CASE == "IEEE-39":
     net = nw.case39()
 else:
@@ -319,7 +325,7 @@ candidate_buses = [b for b in net.bus.index.tolist() if b not in slack_buses]
 print("Computing voltage sensitivities V_n...")
 def violation_score(network):
     vm = network.res_bus["vm_pu"]
-    return float(np.sum((vm_max - 1.0) ** 2))
+    return float(np.sum((vm - 1.0) ** 2))
 
 # Run base power flow to populate net.res_bus before computing base_score
 pp.runpp(net, algorithm="nr", calculate_voltage_angles=True)
@@ -373,8 +379,8 @@ dist_max = dist_n.max()
 if dist_max > 0:
     dist_n = dist_n / dist_max
 
-# 4. Pruning to top-15 candidate buses by voltage sensitivity V_n
-PRUNE_TOP_N = 22
+# 4. Pruning to top-30 candidate buses by voltage sensitivity V_n
+PRUNE_TOP_N = 30
 if PRUNE_TOP_N is not None and len(candidate_buses) > PRUNE_TOP_N:
     top_idx = np.argsort(V_n)[::-1][:PRUNE_TOP_N]
     top_idx_sort = np.sort(top_idx)
@@ -456,12 +462,12 @@ for idx in range(num_objectives):
         qps.append(pickle.load(f))
         
 qp_lin = linearize_qps(qps, [1.0/3.0, 1.0/3.0, 1.0/3.0])
-conv = QuadraticProgramToQubo(penalty=2.0)
+conv = QuadraticProgramToQubo(penalty=10.0)
 qubo = conv.convert(qp_lin)
 ising, _ = qubo.to_ising()
 
 ansatz = QAOAAnsatz(ising, reps=p_layers)
-estimator = AerEstimator(backend_options={"method": "matrix_product_state", "matrix_product_state_max_bond_dimension": 20}, run_options={"shots": 1024})
+estimator = AerEstimator(backend_options={"method": "matrix_product_state", "matrix_product_state_max_bond_dimension": 64}, run_options={"shots": 1024})
 
 def cost_func(params):
     bound_ansatz = ansatz.assign_parameters(params)
@@ -587,15 +593,21 @@ def solve_classical_mo_cplex(num_qubits, problem_dir, num_objectives, num_evalua
         mdl = Model(name='microgrid_mo')
         x = mdl.binary_var_list(num_qubits, name="x")
         
-        # Add budget constraint from the first QP
-        for cstr in qps[0].linear_constraints:
-            expr = sum(coef * x[idx] for idx, coef in cstr.linear.to_dict().items())
-            if cstr.sense.name == "LE":
-                mdl.add_constraint(expr <= cstr.rhs)
-            elif cstr.sense.name == "GE":
-                mdl.add_constraint(expr >= cstr.rhs)
-            elif cstr.sense.name == "EQ":
-                mdl.add_constraint(expr == cstr.rhs)
+        # Add budget constraint from all QPs (they share the same constraint;
+        # iterating all ensures none are missed)
+        seen_constraints = set()
+        for qp in qps:
+            for cstr in qp.linear_constraints:
+                cstr_key = (tuple(sorted(cstr.linear.to_dict().items())), cstr.sense.name, cstr.rhs)
+                if cstr_key not in seen_constraints:
+                    seen_constraints.add(cstr_key)
+                    expr = sum(coef * x[idx] for idx, coef in cstr.linear.to_dict().items())
+                    if cstr.sense.name == "LE":
+                        mdl.add_constraint(expr <= cstr.rhs)
+                    elif cstr.sense.name == "GE":
+                        mdl.add_constraint(expr >= cstr.rhs)
+                    elif cstr.sense.name == "EQ":
+                        mdl.add_constraint(expr == cstr.rhs)
                 
         # Build combined objective
         obj_expr = 0
@@ -737,10 +749,18 @@ import ipywidgets as widgets
 from IPython.display import display
 import numpy as np
 
+# Visualization options
+INTERACTIVE_PLOT = False  # Set to False to render a static, HTML-exportable plot of the best compromise solution
+USE_BENDERS = False       # Set to True to render Benders-QAMOO Pareto front, False for native QAMOO
+
 try:
+    # Determine which results to load
+    target_config = benders_config if USE_BENDERS else config
+    method_name = "Benders-QAMOO" if USE_BENDERS else "Native QAMOO"
+
     # Load the quantum non-dominated solutions
-    nd_positions = np.load(config.results_folder + 'non_dominated_positions.npy')
-    all_samples = np.load(config.results_folder + 'samples.npy')
+    nd_positions = np.load(target_config.results_folder + 'non_dominated_positions.npy')
+    all_samples = np.load(target_config.results_folder + 'samples.npy')
     
     if len(nd_positions) > 0:
         # 1. Create rustworkx graph natively
@@ -750,7 +770,7 @@ try:
         
         # Calculate static layout coordinates
         pos_dict = rx.spring_layout(rx_graph, seed=42)
-        q_pts = np.load(config.results_folder + 'non_dominated_samples.npy')
+        q_pts = np.load(target_config.results_folder + 'non_dominated_samples.npy')
 
         # Build Edge Coordinates (Static)
         edge_x, edge_y = [], []
@@ -760,29 +780,7 @@ try:
             edge_x.extend([x0, x1, None])
             edge_y.extend([y0, y1, None])
 
-        # Define an empty shell FigureWidget with the exact 4 traces we need
-        # Trace 0: Edges, Trace 1: Placed, Trace 2: Standard, Trace 3: Non-candidate
-        fig = go.FigureWidget(
-            data=[
-                go.Scatter(x=edge_x, y=edge_y, line=dict(width=1.5, color='#888'), hoverinfo='none', mode='lines', name='Edges'),
-                go.Scatter(x=[], y=[], mode='markers+text', text=[], textposition="top center", name='Microgrid/Storage Placed (1)', marker=dict(color='#FF6B6B', size=24)),
-                go.Scatter(x=[], y=[], mode='markers+text', text=[], textposition="top center", name='Standard Bus (0)', marker=dict(color='#4ECDC4', size=24)),
-                go.Scatter(x=[], y=[], mode='markers+text', text=[], textposition="top center", name='Non-candidate Bus', marker=dict(color='#E0E0E0', size=24))
-            ],
-            layout=go.Layout(
-                title=dict(text="", font=dict(size=14)),
-                showlegend=True,
-                hovermode='closest',
-                margin=dict(b=20, l=5, r=5, t=60),
-                xaxis=dict(showgrid=False, zeroline=False, showticklabels=False),
-                yaxis=dict(showgrid=False, zeroline=False, showticklabels=False),
-                width=800, height=600,
-                template="plotly_white"
-            )
-        )
-
-        def update_plot_data(sol_idx):
-            """Mutably updates the existing figure data without recreating the plot."""
+        def get_plot_figure(sol_idx):
             best_config = all_samples[nd_positions[sol_idx]]
             obj_vals = q_pts[sol_idx]
             
@@ -807,48 +805,108 @@ try:
                     nc_y.append(y)
                     nc_text.append(f"Bus {bus}")
 
-            # Send data directly into the active traces
-            with fig.batch_update():
-                fig.data[1].x = placed_x
-                fig.data[1].y = placed_y
-                fig.data[1].text = placed_text
-                
-                fig.data[2].x = standard_x
-                fig.data[2].y = standard_y
-                fig.data[2].text = standard_text
-                
-                fig.data[3].x = nc_x
-                fig.data[3].y = nc_y
-                fig.data[3].text = nc_text
-                
-                fig.layout.title.text = (
-                    f'Siting Plan (Solution {sol_idx+1}/{len(nd_positions)})<br>'
-                    f'Voltage Dev: {obj_vals[0]:.4f} | Cost: {obj_vals[1]:.4f} | Reliability: {obj_vals[2]:.4f}'
-                )
+            title_text = (
+                f'Siting Plan ({method_name} - Solution {sol_idx+1}/{len(nd_positions)})<br>'
+                f'Voltage Dev: {obj_vals[0]:.4f} | Cost: {obj_vals[1]:.4f} | Reliability: {obj_vals[2]:.4f}'
+            )
 
-        # Connect the slider to update data points rather than redraw the canvas
-        slider = widgets.IntSlider(
-            min=0, max=len(nd_positions)-1, step=1, 
-            value=len(nd_positions)//2, 
-            description='Pareto Index'
-        )
-        
-        def on_slider_change(change):
-            update_plot_data(change['new'])
+            fig = go.Figure(
+                data=[
+                    go.Scatter(x=edge_x, y=edge_y, line=dict(width=1.5, color='#888'), hoverinfo='none', mode='lines', name='Edges'),
+                    go.Scatter(x=placed_x, y=placed_y, mode='markers+text', text=placed_text, textposition="top center", name='Microgrid/Storage Placed (1)', marker=dict(color='#FF6B6B', size=24)),
+                    go.Scatter(x=standard_x, y=standard_y, mode='markers+text', text=standard_text, textposition="top center", name='Standard Bus (0)', marker=dict(color='#4ECDC4', size=24)),
+                    go.Scatter(x=nc_x, y=nc_y, mode='markers+text', text=nc_text, textposition="top center", name='Non-candidate Bus', marker=dict(color='#E0E0E0', size=24))
+                ],
+                layout=go.Layout(
+                    title=dict(text=title_text, font=dict(size=14)),
+                    showlegend=True,
+                    hovermode='closest',
+                    margin=dict(b=20, l=5, r=5, t=60),
+                    xaxis=dict(showgrid=False, zeroline=False, showticklabels=False),
+                    yaxis=dict(showgrid=False, zeroline=False, showticklabels=False),
+                    width=800, height=600,
+                    template="plotly_white"
+                )
+            )
+            return fig
+
+        if INTERACTIVE_PLOT:
+            # We construct a FigureWidget and bind it to the slider
+            fig = go.FigureWidget(get_plot_figure(len(nd_positions) // 2))
+            
+            def update_plot_data(sol_idx):
+                best_config = all_samples[nd_positions[sol_idx]]
+                obj_vals = q_pts[sol_idx]
                 
-        slider.observe(on_slider_change, names='value')
-        
-        # Run the initial population data sync
-        update_plot_data(slider.value)
-        
-        # Combine layout cleanly: slider on top, single persistent figure directly underneath
-        layout_box = widgets.VBox([slider, fig])
-        display(layout_box)
+                placed_x, placed_y = [], []
+                standard_x, standard_y = [], []
+                nc_x, nc_y = [], []
+                
+                for bus in range(num_buses):
+                    x, y = pos_dict[bus]
+                    if bus in pruned_buses:
+                        idx = pruned_buses.index(bus)
+                        if best_config[idx] == 1:
+                            placed_x.append(x)
+                            placed_y.append(y)
+                        else:
+                            standard_x.append(x)
+                            standard_y.append(y)
+                    else:
+                        nc_x.append(x)
+                        nc_y.append(y)
+                
+                with fig.batch_update():
+                    fig.data[1].x = placed_x
+                    fig.data[1].y = placed_y
+                    fig.data[2].x = standard_x
+                    fig.data[2].y = standard_y
+                    fig.data[3].x = nc_x
+                    fig.data[3].y = nc_y
+                    fig.layout.title.text = (
+                        f'Siting Plan ({method_name} - Solution {sol_idx+1}/{len(nd_positions)})<br>'
+                        f'Voltage Dev: {obj_vals[0]:.4f} | Cost: {obj_vals[1]:.4f} | Reliability: {obj_vals[2]:.4f}'
+                    )
+
+            slider = widgets.IntSlider(
+                min=0, max=len(nd_positions)-1, step=1, 
+                value=len(nd_positions)//2, 
+                description='Pareto Index'
+            )
+            
+            def on_slider_change(change):
+                update_plot_data(change['new'])
+                    
+            slider.observe(on_slider_change, names='value')
+            layout_box = widgets.VBox([slider, fig])
+            display(layout_box)
+        else:
+            # Render the best compromise solution on the quantum Pareto front
+            # We select the compromise solution that minimizes the normalized L2 distance to the ideal point.
+            if len(nd_positions) > 1:
+                # Find ideal point (min values in each objective)
+                ideal = q_pts.min(axis=0)
+                nadir = q_pts.max(axis=0)
+                ranges = nadir - ideal
+                ranges[ranges == 0] = 1e-6
+                
+                # Compute L2 distance from normalized objectives to ideal (0)
+                norm_pts = (q_pts - ideal) / ranges
+                best_sol_idx = int(np.argmin(np.linalg.norm(norm_pts, axis=1)))
+            else:
+                best_sol_idx = 0
+                
+            fig = get_plot_figure(best_sol_idx)
+            fig.layout.title.text += "<br><b>Best Compromise Solution (L2 ideal-compromise on Pareto front)</b>"
+            fig.show()
             
     else:
         print("No non-dominated solutions found to visualize.")
 except Exception as e:
     print(f"Could not render visualization. Error: {e}")
+
+# %% [markdown]
+# ![](qamoo_plot.png)
 
 # %% [markdown]
 # ## 7. Multi-Metric Pareto Quality Analysis

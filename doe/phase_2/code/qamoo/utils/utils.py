@@ -48,13 +48,13 @@ def _eval_loop(samples, Qs):
 
 
 def pareto_front(data: np.ndarray) -> np.ndarray:
-    """Find the Pareto-efficient points."""
+    """Find the Pareto-efficient points (minimization)."""
 
     is_efficient = np.arange(len(data), dtype=np.int64)
     for i in tqdm(range(len(data))):
         if i in is_efficient:
             c = data[i,:]
-            non_dominated = is_efficient[np.where(np.any(data[is_efficient] > c, axis=1))[0]]
+            non_dominated = is_efficient[np.where(np.any(data[is_efficient] < c, axis=1))[0]]
             is_efficient = np.intersect1d(non_dominated, is_efficient)
             is_efficient = np.append(is_efficient, i)
     is_efficient = np.unique(is_efficient)
@@ -71,10 +71,10 @@ def find_first_positions_hashing(x, y):
 
 def compute_hypervolume_progress(problem_folder, results_folder, steps):
 
-    # load objective lower bounds (= reference point for HV)
-    with open(problem_folder + 'lower_bounds.json', 'r') as f:
-        lower_bounds = json.load(f)
-    lower_bounds = np.array(lower_bounds)
+    # load objective upper bounds (= reference point for HV in minimization)
+    with open(problem_folder + 'upper_bounds.json', 'r') as f:
+        upper_bounds = json.load(f)
+    upper_bounds = np.array(upper_bounds)
     
     # load objective graphs or qps
     import pickle
@@ -120,11 +120,11 @@ def compute_hypervolume_progress(problem_folder, results_folder, steps):
         non_dominated_samples = samples_batch[nd_batch, :]
         print('#NDP =', len(non_dominated_samples))
     
-        # compute current HV
+        # compute current HV (minimization: ref_point = upper bounds)
         from pymoo.indicators.hv import HV
         try:
-            ind = HV(ref_point=-lower_bounds)
-            hv = float(ind(-non_dominated_samples))
+            ind = HV(ref_point=upper_bounds)
+            hv = float(ind(non_dominated_samples))
         except Exception as e:
             print("pymoo HV error:", e)
             hv = float(len(non_dominated_samples))

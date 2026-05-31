@@ -37,7 +37,7 @@
 
 
 # %% [markdown]
-# ![mi](../../img/pipeline.png)
+# ![pipeline](../../img/pipeline.png)
 
 # %% [markdown]
 # ## Setup
@@ -79,7 +79,7 @@ current_file_dir = get_current_file_dir()
 
 # %%
 USE_CUDAQ = False
-USE_DIT = False
+USE_DIT = True
 USE_AVAS = False
 USE_H2O_OPTIMIZATIONS = True
 USE_CDF_EMISSION = False
@@ -1865,6 +1865,7 @@ def compute_gamma_pq(C_IP, C_DIP, list_IP, list_DIP, core_idx, n_spin):
     """
     Classical mapping of the Transition RDM: < Phi_DIP | a^dagger_c a_p a_q | Phi_IP >
     Returns a tensor of shape (N_DIP_states, N_IP_states, n_spin, n_spin)
+    Note: this is actually called R_{KI;csr} in the paper.
     """
     num_ip = C_IP.shape[0]
     num_dip = C_DIP.shape[0]

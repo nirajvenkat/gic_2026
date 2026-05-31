@@ -34,7 +34,7 @@
 % PAGE 2: MAIN BODY
 % ----------------------------------------------------
 \section{Focus Area, Rationale, and Stakeholder Relevance}
-This project addresses the strategic siting and capacity sizing of clean energy microgrids and storage systems within power distribution grids. Siting decisions represent a high-stakes, combinatorial planning challenge under complex electrical constraints. To guide real planning outcomes, we model a multi-objective optimization problem that co-optimizes grid resilience ($C_{\rm R}$), capital installation cost ($C_{\rm I}$), and operational voltage control ($C_{\rm VC}$). 
+This project addresses the strategic siting and capacity sizing of clean energy microgrids and storage systems within power distribution grids. Siting decisions represent a high-stakes, combinatorial planning challenge under complex electrical constraints. To guide real planning outcomes, we model a multi-objective optimization problem that co-optimizes grid resilience ($C_{\rm R}$), capital installation cost ($C_{\rm I}$), and operational voltage control ($C_{\rm VC}$). Our pre-rendered Jupyter notebooks on siting optimization, AI load scaling and $N-1$ resilience are available at~\cite{doe_notebook1, doe_notebook2}.
 
 The primary stakeholders and beneficiaries of this methodology include:
 \begin{itemize}[leftmargin=*,noitemsep,topsep=0pt]
@@ -44,10 +44,16 @@ The primary stakeholders and beneficiaries of this methodology include:
 \end{itemize}
 
 \section{Technical Methodology and Hybrid Quantum Integration}
-We implement a hybrid QAMOO~\cite{qamoo2025} and Multiverse~\cite{multiverse2023} optimization framework using a Benders decomposition layout solver. The architecture partition divides the optimization into a classical Master Problem (MP) and an AC power-flow Subproblem (SP), aligning with Benders principles~\cite{pasqal2024}. 
+In our \textbf{first} notebook, we show a hybrid approach based on Quantum Approximate Multi-Objective Optimization (QAMOO) by~\cite{qamoo2025} combined with classical Benders decomposition for strategic siting of energy storage and microgrids. We evaluate an IEEE-33 bus considering 3 objectives inspired by~\cite{multiverse2023} into the following optimization problem:
+$$
+\min \quad C(\overline{x}) = \lambda_{\rm I} C_{\rm I} + \lambda_{\rm R} C_{\rm R} - \lambda_{\rm VC} C_{\rm VC}
+$$
+where $C_{\rm I}$ is the capital investment cost of siting the microgrid assets, $C_{\rm R}$ is the resilience of the grid under various contingency scenarios, and $C_{\rm VC}$ is the voltage control quality of the grid under various load conditions. The architecture partition divides the optimization into a classical Master Problem (MP) and an AC power-flow Subproblem (SP), aligning with Benders principles~\cite{pasqal2024}. 
+
+In our \textbf{second} notebook, we execute a QAOA pipeline against non-linear structural shocks, we stress-tested  IEEE 39 bus across two severe grid-modernization scenarios: an additive load injection model simulating hyperscale AI data centers, and an exhaustive contingency sweep across all 46 transmission lines.
 
 \subsection{Classical Benders Preprocessing (CPU)}
-The Master Problem handles the discrete layout coordinates, selecting the binary portfolio of bus locations for asset placement ($\hat{x}^{(t)} \in \{0,1\}^N$). It is solved using CPLEX/DOcplex~\cite{cplex2024}. The candidate layout $\hat{x}^{(t)}$ is passed to the SP evaluator, which runs a classical AC power-flow simulation using \verb|pandapower|~\cite{pandapower2018}. If physical line limits (thermal branch loading $> 100\%$) or voltage limits ($0.95 \le V_j \le 1.05$ p.u.) are violated, the SP generates linear feasibility cuts:
+The MP handles the discrete layout coordinates, selecting the binary portfolio of bus locations for asset placement ($\hat{x}^{(t)} \in \{0,1\}^N$). It is solved using CPLEX~\cite{cplex2024}. The candidate layout $\hat{x}^{(t)}$ is passed to the SP evaluator, which runs an AC power-flow simulation using pandapower~\cite{pandapower2018}. If physical line limits (thermal branch loading $> 100\%$) or voltage limits ($0.95 \le V_j \le 1.05$ p.u.) are violated, the SP generates linear feasibility cuts:
 \begin{itemize}[leftmargin=*,noitemsep,topsep=0pt]
   \item \textbf{Line Overload Cuts:} For overloaded branches between bus $u$ and $v$: $x_u + x_v \le 1$.
   \item \textbf{Voltage Deviation Cuts:} For bus $w$ experiencing operational bounds violation: $x_w \le 0$.
@@ -56,33 +62,31 @@ The Master Problem handles the discrete layout coordinates, selecting the binary
 These cuts compile iteratively ($T=5$) to form a set of linear constraints on the master layout solver.
 
 \subsection{QUBO Penalty Mapping}
-To embed feasibility constraints into the QAMOO quantum layer, we convert the collected cuts into quadratic penalty terms that modify the self-loop diagonals of the target Ising objective graphs:
-\begin{equation}
-  p_i = \lambda \cdot \hat{x}_i^{(t)}
-\end{equation}
-where $\lambda = 10.0$ is the penalty weight. This mutates the diagonal terms of the objective graphs to penalize infeasible portfolios, steering the quantum variational sampler away from voltage and thermal limit violations.
+To embed feasibility constraints into the QAMOO quantum layer, we convert the collected cuts into quadratic penalty terms $p_i = \lambda \cdot \hat{x}_i^{(t)}$ that modify the self-loop diagonals of the target Ising objective graphs, where $\lambda = 10.0$ is the penalty weight. This mutates the diagonal terms of the objective graphs to penalize infeasible portfolios, steering the quantum variational sampler away from voltage and thermal limit violations.
 
-\subsection{Quantum Siting Optimization (QAMOO) and Error Mitigation}
-Once the penalized graphs are compiled, we train a multi-objective QAOA ($p=3$ layers) optimized using COBYLA on a scalarized representation of the three objectives. The Pareto front is evaluated by executing batched sample runs of size $S=10$ using Dirichlet-distributed scalarization weights. 
+\subsection{Quantum Optimization and Error Mitigation}
+Once the penalized graphs are compiled, we train a multi-objective QAOA ($p=3$ layers) optimized using COBYLA, giving us a warm-start on a scalarized representation of the three objectives. The Pareto front is evaluated by executing batched sample runs of size $S=10$ using Dirichlet-distributed scalarization weights. 
 
-To overcome physical device noise, we have implemented and integrated the client-side \verb|Samplomatic| error-mitigation pipeline using Qiskit's new \verb|Executor| primitive. This pipeline combines three error mitigation techniques:
-\begin{enumerate}[leftmargin=*,noitemsep,topsep=0pt]
-  \item \textbf{Probabilistic Error Cancellation (PEC):} Reconstructs noise-free expectation values by sampling from quasi-probability distributions of noisy circuits using Pauli Lindblad noise maps fetched via \verb|pauli_lindblad_maps|.
-  \item \textbf{Shaded Lightcones (SLC):} Optimizes query budgets by decomposing the full circuit into causal cones and restricting mitigation operations to the active causal cones of target measured qubits.
-  \item \textbf{Propagated Noise Absorption (PNA):} Classically propagates gate error rates through entangling layers and absorbs them to correct expectation biases in post-processing.
-\end{enumerate}
+To overcome physical device noise, we have implemented and integrated the client-side Samplomatic error-mitigation pipeline using Qiskit's new Executor primitive. This pipeline combines three error mitigation techniques: Probabilistic Error Cancellation (PEC), Shaded Lightcones (SLC) and Propagated Noise Absorption (PNA).
+
+\subsection{AI Data Center Shock Modeling and Multi-Objective $N-1$ Contingency Resilience}
+We implement an additive load framework simulating hyperscale AI campus deployment by injecting independent point-source demands (+300 MW / +90 MVAr) directly onto two buses. We track voltage boundary violations across the network. When nominal asset allocations fail, the pipeline dynamically reallocates storage assets to the newly vulnerable corridor to support the local voltage floor.
+
+Additionally, we model cost penalties with an empirical resilience metric (replacing $C_{\rm I}$ for $C_{\text{resilience}}$). We model this by simulating a complete outage tree by sequentially taking all 46 lines out of service. Non-linear grid stability responses under each failure are compiled into a per-bus resilience sensitivity index ($R_n$). This index mutates the self-loop diagonals of the optimization QUBO as follows:
+$$Q_{i,i} = -\alpha V_n[i] + \mu r_n[i] - \nu R_n[i] + \lambda(1 - 2K)$$
+Doing so biases the quantum energy landscape toward robust topologies.
 
 \section{Data Modeling and Benchmarking Strategy}
 Our data modeling strategy utilizes the standard IEEE 33-bus radial distribution system, a public and reproducible test grid. The model incorporates candidate sets for microgrid and storage asset placement across all buses under localized loads and weather-driven outage scenarios. 
 
 To validate the quantum optimization performance, we benchmark Benders-QAMOO against two exact classical methods:
 \begin{enumerate}[leftmargin=*,noitemsep,topsep=0pt]
-  \item \textbf{CPLEX Weighted-Sum:} An exact classical solver executing 30 scalarized mixed-integer linear programming (MILP) evaluations.
-  \item \textbf{Defining Point Algorithm (DPA):} An exact multi-objective integer programming algorithm. The quadratic terms are linearized by introducing auxiliary variables $z_{uv} = x_u x_v$ and solved via a compiled C++ binary (\verb|dpa-main|) under epsilon-constraints.
+  \item \textbf{CPLEX Weighted-Sum:} An exact classical solver executing scalarized mixed-integer linear programming (MILP) evaluations.
+  \item \textbf{Defining Point Algorithm (DPA):} An exact, state-of-the-art multi-objective MILP algorithm. The quadratic terms are linearized by introducing auxiliary variables $z_{uv} = x_u x_v$ and solved using epsilon-constraints.
 \end{enumerate}
 
-\section{Experimental Results and Quality Evaluation}
-The evaluation measures key multi-objective optimization metrics over the simulated runs: Pareto front size ($|{\rm PF}|$), Hypervolume (${\rm HV}$), Inverted Generational Distance (${\rm IGD}$), spacing, additive epsilon indicator ($\epsilon^+$), and coverage ($C(A,B)$). The results on the IEEE 33-bus system are summarized in Table~1.
+\section{Experimental Results and Discussion}
+\underline{First Notebook:} The evaluation measures key multi-objective optimization metrics over the simulated runs: Pareto front size ($|{\rm PF}|$), Hypervolume (${\rm HV}$), Inverted Generational Distance (${\rm IGD}$), spacing, additive epsilon indicator ($\epsilon^+$), and coverage ($C(A,B)$). The results on the IEEE 33-bus system are summarized in Table~1.
 
 \begin{table}[h!]
 \centering
@@ -102,30 +106,30 @@ DPA (Exact Classical) & 1 & 3700.4377 & 0.2829 & N/A & 0.3901 & 0.5000 & 1.0000 
 \end{tabular}
 \end{table}
 
-The results show that integrating Benders cuts as static QUBO penalties dramatically improves quantum optimization. Benders-QAMOO achieved a hypervolume of $71.1870$ (compared to $6.2512$ for native QAMOO), reduced the IGD from $28.3398$ to $25.8634$, and improved the additive epsilon indicator $\epsilon^+$ from $24.5017$ to $22.9644$. 
+% The results show that integrating Benders cuts as static QUBO penalties dramatically improves quantum optimization. Benders-QAMOO achieved a hypervolume of $71.1870$ (compared to $6.2512$ for native QAMOO), reduced the IGD from $28.3398$ to $25.8634$, and improved the additive epsilon indicator $\epsilon^+$ from $24.5017$ to $22.9644$. 
 
-Note that the exact classical benchmarks (CPLEX and DPA) collapse to a single Pareto point ($|{\rm PF}| = 1$). This is a direct mathematical consequence of the IEEE 33-bus system grid topology being a radial network (a tree graph). Since tree graphs are bipartite, a single bipartition configuration (and its complement) cuts every edge in the graph. Under a pure Max-Cut QUBO formulation, this bipartition simultaneously maximizes all three objectives, removing any trade-offs from the exact Pareto front. Similarly, because $|{\rm PF}| = 1$ for the exact methods, their spacing is mathematically undefined (${\rm N/A}$), whereas Benders-QAMOO with $|{\rm PF}| = 2$ has a spacing of $0.0000$ due to identical symmetric pairwise distances.
+% Note that the exact classical benchmarks (CPLEX and DPA) collapse to a single Pareto point ($|{\rm PF}| = 1$). This is a direct mathematical consequence of the IEEE 33-bus system grid topology being a radial network (a tree graph). Since tree graphs are bipartite, a single bipartition configuration (and its complement) cuts every edge in the graph. Under a pure Max-Cut QUBO formulation, this bipartition simultaneously maximizes all three objectives, removing any trade-offs from the exact Pareto front. Similarly, because $|{\rm PF}| = 1$ for the exact methods, their spacing is mathematically undefined (${\rm N/A}$), whereas Benders-QAMOO with $|{\rm PF}| = 2$ has a spacing of $0.0000$ due to identical symmetric pairwise distances.
+
+\underline{Second Notebook:} The warm-start QAOA pipeline ($p=2$ layers) successfully navigated the non-linear shock landscapes. Under the 600 MW collective AI data center surge, the quantum optimizer executed a 100\% asset reallocation shift from buses [8, 15] to [4, 10, 11, 12, 18], maintaining the absolute voltage floor safely above the critical 0.95 p.u. engineering limit within a stable [0.9666, 1.0636] p.u. operating envelope.  Across the full $N-1$ contingency tree, the resilience-aware QAOA successfully bypassed classical greedy traps and minimized global continuous voltage deviations to a tight mean $|\Delta V|$ of 0.02705 p.u.~across all valid outage conditions.
 
 \section{Quantum Platform Justification and Resource Needs}
-Requested: 156-qubit Heron-class QPUs (e.g., Kingston, Fez). Alternative: 120-qubit Eagle-class.
+\textbf{Requested:} 156-qubit Heron-class QPUs (e.g., Kingston, Fez) (Inferior alternative: 120-qubit Eagle-class).\\
+Our rationale for selecting Heron over Eagle:
 \begin{itemize}[leftmargin=*,noitemsep,topsep=0pt]
   \item \textbf{Scale:} Heron supports up to 156 qubits, enabling direct variable encoding of grid cases up to 156 bus widths.
   \item \textbf{Fidelity:} Heron's high 2-qubit gate fidelity ($> 99\%$) and low cross-talk are required for Samplomatic to resolve the signal (fails on noisier Eagle systems).
   \item \textbf{Integration:} Native support for Qiskit Executor primitives.
 \end{itemize}
 
-
 \section{Gap Analysis and Implementation Roadmap}
-While Phase 2 validated the feasibility-penalized QAMOO workflow, the following gaps are slated for our Phase 3 roadmap:
+The following tasks are part of our Phase 3 roadmap:
 \begin{itemize}[leftmargin=*,noitemsep,topsep=0pt]
-  \item \textbf{Online Hybrid Benders Loop:} Transition from the current offline classical preprocessor to an online iterative loop where the QPU directly executes the Master Problem QUBO solver in each iteration.
-  \item \textbf{Exact Constraint Penalization:} Replace the heuristic diagonal penalty weight ($\lambda$) with exact quadratic penalty terms representing the slack variables of inequality constraints.
+  \item \textbf{True Quantum Hybrid Benders Loop:} Transition from the current offline classical preprocessor to an online iterative loop where the QPU directly executes the Master Problem QUBO solver in each iteration, executing the full Samplomatic error-mitigated pipeline (PEC + SLC + PNA) on IBM Heron.
   \item \textbf{Optimality Cuts:} Implement dual-based optimality cuts to bound and optimize objective function values, moving beyond feasibility-only cuts.
-  \item \textbf{Physical QPU Scaling:} Execute the full Samplomatic error-mitigated pipeline on the Heron hardware.
 \end{itemize}
 
 \newpage
-\bibliographystyle{plain}
+\bibliographystyle{unsrt}
 \bibliography{references}
 
 \end{document}
