@@ -1068,7 +1068,7 @@ class GPTQE(GPT):
 
 
 class MHA(nn.Module):
-    """Multi-headed self-attention"""
+    """Multi-headed self-attention with causal masking"""
     def __init__(self, dim: int, heads: int):
         super().__init__()
         assert dim % heads == 0
@@ -1085,6 +1085,11 @@ class MHA(nn.Module):
 
         # Compute attention
         qk = torch.einsum('bhqd,bhkd->bhqk', q, k) * self.scale
+        
+        # Apply causal mask: mask out future tokens (key position > query position)
+        mask = torch.tril(torch.ones(n, n, device=qk.device)).view(1, 1, n, n)
+        qk = qk.masked_fill(mask == 0, float('-inf'))
+        
         attn = torch.softmax(qk, dim=-1)
 
         # Combine with values
