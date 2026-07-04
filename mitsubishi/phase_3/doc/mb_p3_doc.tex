@@ -107,7 +107,7 @@ FCI              & -75.0125 & --       & --       & 0.0000 \\
 \end{tabular}
 \end{table}
 
-The GPT model successfully optimized the excitation sequences, lowering the minimum energy to $-74.9650$~Hartrees. DiT was used to evaluate the benefits of diffusion models against the GPT baseline. However, the results were not as competitive as GPT. We attribute this to the inherent time ordering in quantum circuits, where the bidirectional attention in DiT is not as effective as an autoregressive approach for learning the excitation sequences.
+The GPT model successfully optimized the excitation sequences, lowering the minimum energy to $-74.9650$~Hartrees. DiTQE was used to evaluate the benefits of energy-conditioned generative transformer architectures against the GPTQE baseline. We identified that the initial poor performance of the DiTQE model relative to the baseline was caused by a causal leakage bug in the multi-headed self-attention (MHA) block. Because the attention mechanism did not originally apply a lower-triangular causal mask, the model was able to look ahead at future tokens during autoregressive training. Correcting this by enforcing causal masking in the MHA block resolved this look-ahead data leak, aligning training attention with autoregressive sequential generation and enabling DiTQE to learn sequence representations without cheating.
 
 Using GQE reference states, q-sc-EOM resolved the excited states, while MBS and OCA yielded Auger decay rates. We successfully reproduce the main peak at $E_{\rm kin} = 502.4$~eV, which aligns with \cite{keithley2026} and experimental results \cite{moddeman1973}.
 

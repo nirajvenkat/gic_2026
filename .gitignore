@@ -276,6 +276,10 @@ mitsubishi/phase_2/code/data
 mitsubishi/phase_2/code/seq_*
 doe/phase_2/code/data
 doe/phase_2/code/data_benders
+mitsubishi/phase_3/code/data
+mitsubishi/phase_3/code/seq_*
+doe/phase_3/code/data
+doe/phase_3/code/data_benders
 
 ## Bibliography auxiliary files (bibtex/biblatex/biber):
 *.bbl
