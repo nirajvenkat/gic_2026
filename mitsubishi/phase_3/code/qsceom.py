@@ -94,6 +94,7 @@ def _build_pyscf_molecular_integrals(
     charge: int,
     active_electrons: int,
     active_orbitals: int,
+    use_ecp_avas: bool = False,
 ):
     """Build molecular integrals matching PennyLane's ``method='pyscf'`` path."""
     import numpy as np
@@ -107,12 +108,89 @@ def _build_pyscf_molecular_integrals(
         charge=int(charge),
         active_electrons=int(active_electrons),
         active_orbitals=int(active_orbitals),
+        use_ecp_avas=use_ecp_avas,
     )
     return (
         np.array(core_constant, dtype=float, copy=True),
         np.array(one_mo, dtype=float, copy=True),
         np.array(two_mo, dtype=float, copy=True),
     )
+
+
+def _build_pyscf_molecular_integrals_ecp(
+    *,
+    symbols_key: tuple[str, ...],
+    geometry_key: tuple[float, ...],
+    charge: int,
+    active_electrons: int,
+    active_orbitals: int,
+):
+    """Classical pre-reduction using PySCF + ECP to bypass the N^4 all-electron bottleneck."""
+    import numpy as np
+    from pyscf import gto, scf, ao2mo
+
+    coordinates = np.asarray(geometry_key, dtype=float).reshape(-1, 3)
+
+    # 1. Build the molecule classically with an ECP for Iodine, and STO-3G for other light elements
+    mol = gto.Mole()
+    mol.atom = list(zip(symbols_key, coordinates))
+    
+    basis_map = {}
+    ecp_map = {}
+    for s in symbols_key:
+        if s == "I":
+            basis_map[s] = "lanl2dz"
+            ecp_map[s] = "lanl2dz"
+        else:
+            basis_map[s] = "sto-3g"
+            
+    mol.basis = basis_map
+    mol.ecp = ecp_map
+    mol.charge = charge
+    mol.spin = 0
+    mol.build(verbose=0)
+
+    # 2. Run Hartree-Fock
+    mf = scf.RHF(mol)
+    mf.kernel()
+
+    # 3. Extract molecular orbital coefficients and raw integrals
+    n_orbitals = mf.mo_coeff.shape[1]
+    h_core = mf.get_hcore()
+    T = mf.mo_coeff.T @ h_core @ mf.mo_coeff
+    
+    two_body_ao = mol.intor('int2e')
+    V = ao2mo.kernel(two_body_ao, mf.mo_coeff)
+    V = ao2mo.restore(1, V, n_orbitals) # chemist notation (N, N, N, N)
+
+    # 4. Perform active space selection
+    n_electrons = mol.nelectron
+    n_core = (n_electrons // 2) - (active_electrons // 2)
+    core_indices = list(range(n_core))
+    active_indices = list(range(n_core, n_core + active_orbitals))
+
+    # Core energy constant (nuclear repulsion + core orbital energies)
+    core_constant = float(mf.energy_nuc())
+    for i in core_indices:
+        core_constant += 2.0 * T[i, i]
+        for j in core_indices:
+            core_constant += 2.0 * V[i, i, j, j] - V[i, j, j, i]
+
+    # Effective one-body integrals
+    n_active = len(active_indices)
+    one_mo = np.zeros((n_active, n_active))
+    for u_idx, u in enumerate(active_indices):
+        for v_idx, v in enumerate(active_indices):
+            val = T[u, v]
+            for i in core_indices:
+                val += 2.0 * V[u, v, i, i] - V[u, i, i, v]
+            one_mo[u_idx, v_idx] = val
+
+    # Effective two-body integrals in OpenFermion transpose format
+    V_active = V[active_indices][:, active_indices][:, :, active_indices][:, :, :, active_indices]
+    two_mo = V_active.transpose(0, 2, 3, 1)
+
+    return core_constant, one_mo, two_mo
 
 
 @lru_cache(maxsize=32)
@@ -124,21 +202,31 @@ def _build_pyscf_molecular_integrals_cached(
     charge: int,
     active_electrons: int,
     active_orbitals: int,
+    use_ecp_avas: bool = False,
 ):
     """Cached PySCF integral builder for repeated qscEOM runs on the same molecule."""
     import numpy as np
-    from pennylane.qchem import openfermion_pyscf as qchem_ofp
 
-    coordinates = np.asarray(geometry_key, dtype=float)
-    core_constant, one_mo, two_mo = qchem_ofp._pyscf_integrals(
-        list(symbols_key),
-        coordinates,
-        charge=charge,
-        mult=1,
-        basis=basis,
-        active_electrons=active_electrons,
-        active_orbitals=active_orbitals,
-    )
+    if use_ecp_avas and "I" in symbols_key:
+        core_constant, one_mo, two_mo = _build_pyscf_molecular_integrals_ecp(
+            symbols_key=symbols_key,
+            geometry_key=geometry_key,
+            charge=charge,
+            active_electrons=active_electrons,
+            active_orbitals=active_orbitals,
+        )
+    else:
+        from pennylane.qchem import openfermion_pyscf as qchem_ofp
+        coordinates = np.asarray(geometry_key, dtype=float)
+        core_constant, one_mo, two_mo = qchem_ofp._pyscf_integrals(
+            list(symbols_key),
+            coordinates,
+            charge=charge,
+            mult=1,
+            basis=basis,
+            active_electrons=active_electrons,
+            active_orbitals=active_orbitals,
+        )
     return (
         np.asarray(core_constant, dtype=float),
         np.asarray(one_mo, dtype=float),
@@ -187,6 +275,7 @@ def _build_exact_fermion_operator(
     charge: int,
     active_electrons: int,
     active_orbitals: int,
+    use_ecp_avas: bool = False,
 ):
     """Build the exact molecular Hamiltonian as an OpenFermion FermionOperator."""
     import numpy as np
@@ -204,6 +293,7 @@ def _build_exact_fermion_operator(
         charge=charge,
         active_electrons=active_electrons,
         active_orbitals=active_orbitals,
+        use_ecp_avas=use_ecp_avas,
     )
     one_spin, two_spin = _expand_spatial_integrals_to_spin_orbital(one_mo, two_mo)
     interaction = InteractionOperator(
@@ -223,6 +313,7 @@ def _build_brg_fermion_operator(
     active_electrons: int,
     active_orbitals: int,
     brg_tolerance: float,
+    use_ecp_avas: bool = False,
 ):
     """Build a BRG-truncated molecular Hamiltonian as an OpenFermion FermionOperator."""
     import numpy as np
@@ -242,6 +333,7 @@ def _build_brg_fermion_operator(
         charge=charge,
         active_electrons=active_electrons,
         active_orbitals=active_orbitals,
+        use_ecp_avas=use_ecp_avas,
     )
     one_spin, two_spin = _expand_spatial_integrals_to_spin_orbital(one_mo, two_mo)
     eigenvalues, one_body_squares, one_body_correction, truncation_value = low_rank_two_body_decomposition(
@@ -289,6 +381,7 @@ def _build_brg_hamiltonian_dense(
     active_electrons: int,
     active_orbitals: int,
     brg_tolerance: float,
+    use_ecp_avas: bool = False,
 ):
     """Build a BRG-truncated dense molecular Hamiltonian matrix."""
     import numpy as np
@@ -305,6 +398,7 @@ def _build_brg_hamiltonian_dense(
         active_electrons=active_electrons,
         active_orbitals=active_orbitals,
         brg_tolerance=brg_tolerance,
+        use_ecp_avas=use_ecp_avas,
     )
     n_spin_orbitals = int(2 * int(active_orbitals))
     dense = np.asarray(get_sparse_operator(fermion_op, n_qubits=n_spin_orbitals).toarray(), dtype=complex)
@@ -445,12 +539,19 @@ def _qsceom_worker_init(payload):
     null_state = payload["null_state"]
     ansatz_type = str(payload["ansatz_type"])
     device_name = payload["device_name"]
+    use_taper = payload.get("use_taper", False)
+    tapered_ansatz = payload.get("tapered_ansatz", None)
 
     dev = _make_device(device_name, qubits, shots, device_kwargs)
 
     def _apply_ansatz_local(params_local, ash_local):
-        for i, excitations in enumerate(ash_local):
-            _apply_excitation_gate(qml, excitations, params_local[i], ansatz_type)
+        if use_taper and tapered_ansatz is not None:
+            for t_ops in tapered_ansatz:
+                for op in t_ops:
+                    qml.apply(op)
+        else:
+            for i, excitations in enumerate(ash_local):
+                _apply_excitation_gate(qml, excitations, params_local[i], ansatz_type)
 
     @qml.qnode(dev)
     def _diag_by_index(idx):
@@ -547,12 +648,19 @@ def _qsceom_state_worker_init(payload):
     null_state = payload["null_state"]
     ansatz_type = str(payload["ansatz_type"])
     device_name = payload["device_name"]
+    use_taper = payload.get("use_taper", False)
+    tapered_ansatz = payload.get("tapered_ansatz", None)
 
     dev = _make_device(device_name, qubits, device_kwargs)
 
     def _apply_ansatz_local(params_local, ash_local):
-        for i, excitations in enumerate(ash_local):
-            _apply_excitation_gate(qml, excitations, params_local[i], ansatz_type)
+        if use_taper and tapered_ansatz is not None:
+            for t_ops in tapered_ansatz:
+                for op in t_ops:
+                    qml.apply(op)
+        else:
+            for i, excitations in enumerate(ash_local):
+                _apply_excitation_gate(qml, excitations, params_local[i], ansatz_type)
 
     @qml.qnode(dev)
     def _state_by_index(idx):
@@ -613,6 +721,8 @@ def qscEOM(
     projector_backend: str = "auto",
     return_details: bool = False,
     outpath: str = ".",
+    use_ecp_avas: bool = False,
+    use_taper: bool = False,
 ):
     """Compute qscEOM eigenvalues from an ansatz state.
 
@@ -767,7 +877,10 @@ def qscEOM(
         ) from exc
 
     resolved_projector_backend = projector_backend
-    if projector_backend == "auto":
+    resolved_projector_backend = projector_backend
+    if use_taper:
+        resolved_projector_backend = "dense"
+    elif projector_backend == "auto":
         if shots == 0 and method_normalized == "pyscf":
             try:
                 import openfermion  # noqa: F401
@@ -781,34 +894,92 @@ def qscEOM(
     H = None
     qubits = 2 * int(active_orbitals)
     if shots != 0 or resolved_projector_backend == "dense":
-        H, qubits = qml.qchem.molecular_hamiltonian(
-            symbols,
-            geometry,
-            basis=basis,
-            method=method,
-            active_electrons=active_electrons,
-            active_orbitals=active_orbitals,
-            charge=charge,
-            mult=mult,
-            outpath=outpath,
-        )
-        if pauli_grouping and hasattr(H, "compute_grouping"):
+        if use_ecp_avas and "I" in symbols:
+            # Construct H from ECP integrals classically
+            from openfermion import InteractionOperator, get_fermion_operator, jordan_wigner
+            core_constant, one_mo, two_mo = _build_pyscf_molecular_integrals(
+                symbols=symbols,
+                geometry=geometry,
+                basis=basis,
+                charge=charge,
+                active_electrons=active_electrons,
+                active_orbitals=active_orbitals,
+                use_ecp_avas=True,
+            )
+            one_spin, two_spin = _expand_spatial_integrals_to_spin_orbital(one_mo, two_mo)
+            interaction = InteractionOperator(
+                float(np.asarray(core_constant, dtype=float).reshape(-1)[0]),
+                one_spin,
+                two_spin,
+            )
+            ferm_op = get_fermion_operator(interaction)
+            qubit_op = jordan_wigner(ferm_op)
+            H = qml.from_openfermion(qubit_op)
+            qubits = 2 * int(active_orbitals)
+        else:
+            H, qubits = qml.qchem.molecular_hamiltonian(
+                symbols,
+                geometry,
+                basis=basis,
+                method=method,
+                active_electrons=active_electrons,
+                active_orbitals=active_orbitals,
+                charge=charge,
+                mult=mult,
+                outpath=outpath,
+            )
+        if pauli_grouping and H is not None and hasattr(H, "compute_grouping"):
             H.compute_grouping(grouping_type=grouping_type)
 
     hf_state = qml.qchem.hf_state(active_electrons, qubits)
-    singles, doubles = qml.qchem.excitations(active_electrons, qubits)
+    
+    generators = []
+    tapered_ansatz = None
+    if use_taper and H is not None:
+        generators = qml.symmetry_generators(H)
+        if len(generators) > 0:
+            paulixops = qml.paulix_ops(generators, qubits)
+            paulix_sector = qml.qchem.optimal_sector(H, generators, active_electrons)
+            
+            # Pre-taper the ansatz operations
+            tapered_ansatz = []
+            wire_order = list(range(qubits))
+            for i, exc in enumerate(ash_excitation or []):
+                theta = params[i]
+                if len(exc) == 2:
+                    op = qml.SingleExcitation(theta, wires=exc)
+                elif len(exc) == 4:
+                    op = qml.DoubleExcitation(theta, wires=exc)
+                else:
+                    tapered_ansatz.append([])
+                    continue
+                try:
+                    t_ops = qml.qchem.taper_operation(op, generators, paulixops, paulix_sector, wire_order)
+                    tapered_ansatz.append(t_ops)
+                except Exception:
+                    tapered_ansatz.append([])
+
+            H = qml.taper(H, generators, paulixops, paulix_sector)
+            hf_state = qml.qchem.taper_hf(generators, paulixops, paulix_sector, active_electrons, qubits)
+            
+            qubits = qubits - len(generators)
+            list1 = [list(int(v) for v in occ) for occ in inite(active_electrons, qubits)]
+        else:
+            list1 = [list(int(v) for v in occ) for occ in inite(active_electrons, qubits)]
+    else:
+        list1 = [list(int(v) for v in occ) for occ in inite(active_electrons, qubits)]
+
+    singles, doubles = qml.qchem.excitations(active_electrons, qubits + (len(generators) if (use_taper and len(generators) > 0) else 0))
     s_wires, d_wires = qml.qchem.excitations_to_wires(singles, doubles)
     wires = range(qubits)
 
     null_state = np.zeros(qubits, int)
-    list1 = [list(int(v) for v in occ) for occ in inite(active_electrons, qubits)]
     ref_occ = [int(i) for i, bit in enumerate(np.asarray(hf_state, dtype=int)) if int(bit) == 1]
     if include_identity:
         basis_occ = [ref_occ] + [occ for occ in list1 if occ != ref_occ]
     else:
         basis_occ = [occ for occ in list1 if occ != ref_occ]
 
-    # De-duplicate while preserving order.
     seen_occ = set()
     list1 = []
     for occ in basis_occ:
@@ -845,31 +1016,41 @@ def qscEOM(
 
     def _build_circuit_state(dev):
         @qml.qnode(dev)
-        def circuit_state_local(params_local, occ, hf_state_local, ash_local):
+        def circuit_state_local(params_local, occ, hf_state_local, ash_local, tapered_ansatz_local=None):
             qml.BasisState(hf_state_local, wires=range(qubits))
             for w in occ:
                 qml.X(wires=w)
-            for i, excitations in enumerate(ash_local):
-                _apply_excitation_gate(qml, excitations, params_local[i], ansatz_type)
+            if use_taper and tapered_ansatz_local is not None:
+                for t_ops in tapered_ansatz_local:
+                    for op in t_ops:
+                        qml.apply(op)
+            else:
+                for i, excitations in enumerate(ash_local):
+                    _apply_excitation_gate(qml, excitations, params_local[i], ansatz_type)
             return qml.state()
 
         return circuit_state_local
 
     def _build_circuit_d(dev):
         @qml.qnode(dev)
-        def circuit_d_local(params_local, occ, wires, s_wires, d_wires, hf_state_local, ash_local):
+        def circuit_d_local(params_local, occ, wires, s_wires, d_wires, hf_state_local, ash_local, tapered_ansatz_local=None):
             qml.BasisState(hf_state_local, wires=range(qubits))
             for w in occ:
                 qml.X(wires=w)
-            for i, excitations in enumerate(ash_local):
-                _apply_excitation_gate(qml, excitations, params_local[i], ansatz_type)
+            if use_taper and tapered_ansatz_local is not None:
+                for t_ops in tapered_ansatz_local:
+                    for op in t_ops:
+                        qml.apply(op)
+            else:
+                for i, excitations in enumerate(ash_local):
+                    _apply_excitation_gate(qml, excitations, params_local[i], ansatz_type)
             return qml.expval(H)
 
         return circuit_d_local
 
     def _build_circuit_od(dev):
         @qml.qnode(dev)
-        def circuit_od_local(params_local, occ1, occ2, wires, s_wires, d_wires, hf_state_local, ash_local):
+        def circuit_od_local(params_local, occ1, occ2, wires, s_wires, d_wires, hf_state_local, ash_local, tapered_ansatz_local=None):
             qml.BasisState(hf_state_local, wires=range(qubits))
             for w in occ1:
                 qml.X(wires=w)
@@ -888,8 +1069,13 @@ def qscEOM(
                         qml.Hadamard(wires=v)
                     else:
                         qml.CNOT(wires=[first, v])
-            for i, excitations in enumerate(ash_local):
-                _apply_excitation_gate(qml, excitations, params_local[i], ansatz_type)
+            if use_taper and tapered_ansatz_local is not None:
+                for t_ops in tapered_ansatz_local:
+                    for op in t_ops:
+                        qml.apply(op)
+            else:
+                for i, excitations in enumerate(ash_local):
+                    _apply_excitation_gate(qml, excitations, params_local[i], ansatz_type)
             return qml.expval(H)
 
         return circuit_od_local
@@ -924,6 +1110,7 @@ def qscEOM(
                         list1[idx],
                         null_state,
                         ash_excitation,
+                        tapered_ansatz,
                     ),
                     dtype=complex,
                 )
@@ -948,6 +1135,8 @@ def qscEOM(
                         "ansatz_type": ansatz_type,
                         "device_name": device_name,
                         "device_kwargs": device_kwargs_local,
+                        "use_taper": use_taper,
+                        "tapered_ansatz": tapered_ansatz,
                     }
                     try:
                         mp_context = mp.get_context("fork")
@@ -1065,6 +1254,8 @@ def qscEOM(
                 "ansatz_type": ansatz_type,
                 "device_name": device_name,
                 "device_kwargs": device_kwargs_local,
+                "use_taper": use_taper,
+                "tapered_ansatz": tapered_ansatz,
             }
             try:
                 mp_context = mp.get_context("fork")
@@ -1088,7 +1279,7 @@ def qscEOM(
         circuit_d_local = _build_circuit_d(local_dev)
         out = {}
         for idx in chunk_indices:
-            value = circuit_d_local(params, list1[idx], wires, s_wires, d_wires, null_state, ash_excitation)
+            value = circuit_d_local(params, list1[idx], wires, s_wires, d_wires, null_state, ash_excitation, tapered_ansatz)
             out[idx] = _to_real_scalar(value)
         return out
 
@@ -1106,6 +1297,7 @@ def qscEOM(
                 d_wires,
                 null_state,
                 ash_excitation,
+                tapered_ansatz,
             )
             value = _to_real_scalar(mtmp) - diagonal_values[i] / 2.0 - diagonal_values[j] / 2.0
             out[(i, j)] = float(value)
@@ -1139,7 +1331,7 @@ def qscEOM(
             circuit_d = _build_circuit_d(dev)
             for i in diagonal_indices:
                 M[i, i] = _to_real_scalar(
-                    circuit_d(params, list1[i], wires, s_wires, d_wires, null_state, ash_excitation)
+                    circuit_d(params, list1[i], wires, s_wires, d_wires, null_state, ash_excitation, tapered_ansatz)
                 )
 
         if symmetric:
@@ -1190,6 +1382,7 @@ def qscEOM(
                             d_wires,
                             null_state,
                             ash_excitation,
+                            tapered_ansatz,
                         )
                         value = _to_real_scalar(mtmp) - M[i, i] / 2.0 - M[j, j] / 2.0
                         M[i, j] = value
@@ -1207,6 +1400,7 @@ def qscEOM(
                                 d_wires,
                                 null_state,
                                 ash_excitation,
+                                tapered_ansatz,
                             )
                             M[i, j] = _to_real_scalar(mtmp) - M[i, i] / 2.0 - M[j, j] / 2.0
     finally:

@@ -56,8 +56,8 @@ def get_current_file_dir():
     try:
         return os.path.dirname(os.path.abspath(__file__))
     except NameError:
-        if os.path.exists("mitsubishi/phase_2/code"):
-            return os.path.abspath("mitsubishi/phase_2/code")
+        if os.path.exists("mitsubishi/phase_3/code"):
+            return os.path.abspath("mitsubishi/phase_3/code")
         return os.getcwd()
 
 current_file_dir = get_current_file_dir()
@@ -67,10 +67,10 @@ current_file_dir = get_current_file_dir()
 #
 # Configure the execution parameters for the simulation:
 #
-# * **`USE_CUDAQ`**: If `True`, use NVIDIA's CUDA-Q backend for GPU-accelerated quantum simulation.
+# * **`USE_CUDA`**: If `True`, enable cuQuantum using PennyLane device "lightning.gpu" and enable CUDA kernels in PyTorch through the "cuda" device.
 # * **`USE_DIT`**: If `True`, enable Diffusion Transformer (DIT) for GQE training as an alternative to the auto-regressive GPTnano.
-# * **`USE_AVAS`**: If `True`, apply Active Space Selection (AVAS) to reduce the molecular active space size.
-# * **`USE_H2O_OPTIMIZATIONS`**: If `True`, enable specialized performance optimizations for the $\rm H_2O$ molecule.
+# * **`USE_ECP_AVAS`**: If `True`, apply Effective Core Potentials (ECP) with active space selection (AVAS) for heavy atoms (like Iodine) to reduce the molecular active space size.
+# * **`USE_TAPER`**: If `True`, apply $Z_2$ symmetry tapering classically to aggressively reduce active qubits.
 # * **`USE_CDF_*`**: Enable Compressed Double Factorization (CDF) to calculate a low-rank Hamiltonian approximation with linear scaling.
 #     * **`USE_CDF_EMISSION`**: If `True`, apply CDF to the Auger emission Hamiltonian, yielding a low-rank two-body approximation.
 #     * **`USE_CDF_ABSORPTION`**: If `True`, apply CDF to the absorption spectrum Hamiltonian, using factorized Trotter evolution instead of the full molecular Hamiltonian.
@@ -78,25 +78,29 @@ current_file_dir = get_current_file_dir()
 # * **`SAVE_PLOTS`**: If `True`, export matplotlib rasterized copies of the Auger and absorption spectra to PNG files alongside the interactive hvplot output.
 
 # %%
-USE_CUDAQ = False
+target_molecule = "H2O"
+USE_CUDA = False
 USE_DIT = True
-USE_AVAS = False
-USE_H2O_OPTIMIZATIONS = True
+USE_ECP_AVAS = True
+USE_TAPER = True
 USE_CDF_EMISSION = False
 USE_CDF_ABSORPTION = True
 ANALYTIC_QUANTUM_ABSORPTION = True
 SAVE_PLOTS = False
 
 cache_dir = os.path.join(current_file_dir, "data", "qsceom")
-cache_suffix = "_avas" if USE_AVAS else ""
-cache_path = os.path.join(cache_dir, f"qsceom_cache{cache_suffix}.pkl")
+setting_suffix = ""
+if USE_ECP_AVAS:
+    setting_suffix += "_ecpavas"
+if USE_TAPER:
+    setting_suffix += "_taper"
+
+cache_path = os.path.join(cache_dir, f"qsceom_cache{setting_suffix}.pkl")
 has_cache = os.path.exists(cache_path)
-openmolcas_filepath = os.path.abspath(os.path.join(current_file_dir, "data", "openmolcas", "h2o_aes.gqe_integrals.h5"))
+openmolcas_filepath = os.path.abspath(os.path.join(current_file_dir, "data", "openmolcas", f"{target_molecule.lower()}_aes.gqe_integrals.h5"))
 
 seq_len = 4
-trial_name = "trial_h2o"
-if USE_AVAS:
-    trial_name += "_avas"
+trial_name = f"trial_{target_molecule.lower()}{setting_suffix}"
 save_dir = os.path.abspath(os.path.join(current_file_dir, "data", f"seq_len={seq_len}/{trial_name}"))
 
 
@@ -119,13 +123,26 @@ import numpy as np
 import pennylane as qml
 import pubchempy as pcp
 
-def compute_cdf_hamiltonian(molecule, hamiltonian, use_avas, active_electrons_val, active_orbitals_val, molecule_name, use_bliss=True):
+def compute_cdf_hamiltonian(molecule, hamiltonian, use_ecp_avas, active_electrons_val, active_orbitals_val, molecule_name, use_bliss=True):
     """Computes the Compressed Double Factorization (CDF) representation of the Hamiltonian."""
     print(f"Constructing CDF Hamiltonian for {molecule_name}...")
     import optax
     import jax
     
-    if use_avas:
+    if use_ecp_avas and "I" in molecule.symbols:
+        from qsceom import _build_pyscf_molecular_integrals
+        nuc_core, one_body, two_mo_of = _build_pyscf_molecular_integrals(
+            symbols=molecule.symbols,
+            geometry=molecule.coordinates,
+            basis="sto-3g",
+            charge=molecule.charge,
+            active_electrons=active_electrons_val,
+            active_orbitals=active_orbitals_val,
+            use_ecp_avas=True,
+        )
+        V_active = two_mo_of.transpose(0, 3, 1, 2)
+        two_body = V_active.transpose(0, 3, 2, 1)
+    elif use_ecp_avas:
         core_list, active_list = qml.qchem.active_space(
             molecule.n_electrons, molecule.n_orbitals, 
             active_electrons=active_electrons_val, active_orbitals=active_orbitals_val
@@ -188,13 +205,15 @@ def compute_cdf_hamiltonian(molecule, hamiltonian, use_avas, active_electrons_va
 # 1. **Data Source Selection**:
 #    * **`qchem` path**: Loads precomputed molecular coordinates and settings directly from PennyLane's curated chemistry datasets.
 #    * **`pubchem` path**: Dynamically queries the PubChem 3D database (using compound names or CIDs) to fetch geometries for custom target molecules like IMePh.
-# 2. **Active Space Selection (AVAS)**:
-#    * Trims the molecular orbitals down to a defined active space (e.g., active valence electrons and orbitals) to ensure that downstream state-vector simulation remains classically tractable.
-# 3. **CDF Integration**:
+# 2. **Effective Core Potential & Active Space Selection (ECP + AVAS)**:
+#    * For Iodine-containing systems (like IMePh), replaces the 46 core electrons with a pseudopotential (LANL2DZ ECP) and extracts a classically constructed CAS(24e, 18o) active space to ensure classical tractability.
+# 3. **Z2 Symmetry Tapering**:
+#    * If `USE_TAPER=True`, finds the Z2 generators of the molecular Hamiltonian and projects the Hamiltonian, HF state, and the operator pool into the optimal sector, reducing the active qubits count by the number of symmetries found.
+# 4. **CDF Integration**:
 #    * If `use_cdf=True`, delegates the integral transformation and compressed factorization to `compute_cdf_hamiltonian`.
 
 # %%
-def generate_molecule_data(molecule_name="H2", source="qchem", local_dataset_path=None, use_avas=False, use_cdf=False):
+def generate_molecule_data(molecule_name="H2", source="qchem", local_dataset_path=None, use_ecp_avas=False, use_cdf=False):
     if local_dataset_path is None:
         local_dataset_path = os.path.join(get_current_file_dir(), "data")
     # Get the time set T
@@ -205,7 +224,7 @@ def generate_molecule_data(molecule_name="H2", source="qchem", local_dataset_pat
     
     if source == "pubchem":
         import pickle
-        cache_suffix = "_avas" if use_avas else ""
+        cache_suffix = "_ecpavas" if use_ecp_avas else ""
         cache_file = os.path.join(local_dataset_path, f"{molecule_name}_pubchem{cache_suffix}.pkl")
         if os.path.exists(cache_file):
             print(f"Loading {molecule_name} (pubchem) from local cache: {cache_file}")
@@ -244,31 +263,10 @@ def generate_molecule_data(molecule_name="H2", source="qchem", local_dataset_pat
         symbols = molecule.symbols
         coords = molecule.coordinates
         
-        if use_avas and USE_H2O_OPTIMIZATIONS and molecule_name == "H2O":
-            active_electrons = 8
-            active_orbitals = 6
-            num_electrons = active_electrons
-            num_qubits = 2 * active_orbitals
-            
-            # Rebuild Hamiltonian with active space
-            hamiltonian, num_qubits = qml.qchem.molecular_hamiltonian(
-                symbols, 
-                coords, 
-                active_electrons=active_electrons, 
-                active_orbitals=active_orbitals
-            )
-            hf_state = qml.qchem.hf_state(active_electrons, num_qubits)
-            
-            # Compute active space expected ground state energy (FCI energy)
-            import scipy.sparse.linalg
-            H_sparse = hamiltonian.sparse_matrix()
-            eigenvalues = scipy.sparse.linalg.eigsh(H_sparse, k=1, which='SA', return_eigenvectors=False)
-            expected_ground_state_E = float(eigenvalues[0])
-        else:
-            num_electrons, num_qubits = molecule.n_electrons, 2 * molecule.n_orbitals
-            hf_state = dataset.hf_state
-            hamiltonian = dataset.hamiltonian
-            expected_ground_state_E = dataset.fci_energy
+        num_electrons, num_qubits = molecule.n_electrons, 2 * molecule.n_orbitals
+        hf_state = dataset.hf_state
+        hamiltonian = dataset.hamiltonian
+        expected_ground_state_E = dataset.fci_energy
         
     elif source == "pubchem":
         # Fetch from PubChem
@@ -298,29 +296,80 @@ def generate_molecule_data(molecule_name="H2", source="qchem", local_dataset_pat
                             getattr(atom, 'y', 0.0) or 0.0, 
                             getattr(atom, 'z', 0.0) or 0.0] for atom in c.atoms])
         
-        if use_avas and USE_H2O_OPTIMIZATIONS and molecule_name == "H2O":
-            active_electrons = 8
-            active_orbitals = 6
-            num_electrons = active_electrons
-            num_qubits = 2 * active_orbitals
+    # Build Hamiltonian using ECP + AVAS if enabled
+    if use_ecp_avas and "I" in symbols:
+        # Set active space parameters for IMePh (default: 24 electrons, 18 orbitals)
+        active_electrons = 24
+        active_orbitals = 18
+        
+        # Print progress
+        print(f"\n--- {molecule_name} Qubit Reduction Progress ---")
+        
+        # 1. All-electron qubits
+        try:
+            from pyscf import gto
+            mol_all = gto.Mole()
+            mol_all.atom = list(zip(symbols, coords))
+            mol_all.basis = "sto-3g"
+            mol_all.build(verbose=0)
+            print(f"[Step 1] All-Electron Qubits: {2 * mol_all.nao} (sto-3g)")
+        except Exception:
+            pass
+        
+        # 2. ECP Reduced Qubits
+        try:
+            mol_ecp = gto.Mole()
+            mol_ecp.atom = list(zip(symbols, coords))
+            basis_map = {}
+            ecp_map = {}
+            for s in symbols:
+                if s == "I":
+                    basis_map[s] = "lanl2dz"
+                    ecp_map[s] = "lanl2dz"
+                else:
+                    basis_map[s] = "sto-3g"
+            mol_ecp.basis = basis_map
+            mol_ecp.ecp = ecp_map
+            mol_ecp.build(verbose=0)
+            print(f"[Step 2] ECP Reduced Qubits:  {2 * mol_ecp.nao} (lanl2dz ECP for I)")
+        except Exception:
+            pass
             
-            # Build Hamiltonian with active space
-            hamiltonian, num_qubits = qml.qchem.molecular_hamiltonian(
-                symbols, 
-                coords, 
-                active_electrons=active_electrons, 
-                active_orbitals=active_orbitals,
-                load_data=True
-            )
-            hf_state = qml.qchem.hf_state(active_electrons, num_qubits)
-            
-            # Compute active space expected ground state energy (FCI energy)
-            import scipy.sparse.linalg
-            H_sparse = hamiltonian.sparse_matrix()
-            eigenvalues = scipy.sparse.linalg.eigsh(H_sparse, k=1, which='SA', return_eigenvectors=False)
-            expected_ground_state_E = float(eigenvalues[0])
-        else:
-            # Build Hamiltonian and molecule using PennyLane
+        # 3. ECP+AVAS Active Qubits
+        print(f"[Step 3] ECP+AVAS Active Qubits: {2 * active_orbitals} (CAS({active_electrons}e, {active_orbitals}o))")
+
+        # Construct H from ECP integrals classically
+        import sys
+        sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+        from qsceom import _build_pyscf_molecular_integrals, _expand_spatial_integrals_to_spin_orbital
+        from openfermion import InteractionOperator, get_fermion_operator, jordan_wigner
+        
+        core_constant, one_mo, two_mo = _build_pyscf_molecular_integrals(
+            symbols=symbols,
+            geometry=coords,
+            basis="sto-3g",
+            charge=0,
+            active_electrons=active_electrons,
+            active_orbitals=active_orbitals,
+            use_ecp_avas=True,
+        )
+        one_spin, two_spin = _expand_spatial_integrals_to_spin_orbital(one_mo, two_mo)
+        interaction = InteractionOperator(
+            float(core_constant),
+            one_spin,
+            two_spin,
+        )
+        ferm_op = get_fermion_operator(interaction)
+        qubit_op = jordan_wigner(ferm_op)
+        hamiltonian = qml.from_openfermion(qubit_op)
+        
+        num_qubits = 2 * active_orbitals
+        num_electrons = active_electrons
+        hf_state = qml.qchem.hf_state(num_electrons, num_qubits)
+        expected_ground_state_E = None
+    else:
+        # Build all-electron molecular Hamiltonian if not already defined (i.e. if pubchem source)
+        if source == "pubchem":
             hamiltonian, num_qubits = qml.qchem.molecular_hamiltonian(symbols, coords, load_data=True)
             
             # Simple estimation of electrons (assuming neutral molecule)
@@ -328,13 +377,60 @@ def generate_molecule_data(molecule_name="H2", source="qchem", local_dataset_pat
             num_electrons = sum([electron_map.get(s, 0) for s in symbols]) 
             
             hf_state = qml.qchem.hf_state(num_electrons, num_qubits)
-            expected_ground_state_E = None # FCI energy isn't directly pulled from PubChem
+            expected_ground_state_E = None
+        
+        # Print progress for water or small molecules
+        print(f"\n--- {molecule_name} Qubit Reduction Progress ---")
+        try:
+            print(f"[Step 1] All-Electron Qubits: {num_qubits} (sto-3g)")
+            print(f"[Step 2] ECP Reduced Qubits:  {num_qubits} (No ECP applied)")
+            print(f"[Step 3] ECP+AVAS Active Qubits: {num_qubits} (All-Electron)")
+        except Exception:
+            pass
+
+    active_electrons_save = num_electrons
+    active_orbitals_save = num_qubits // 2
 
     singles, doubles = qml.qchem.excitations(num_electrons, num_qubits)
     double_excs = [qml.DoubleExcitation(time, wires=double) for double in doubles for time in op_times]
     single_excs = [qml.SingleExcitation(time, wires=single) for single in singles for time in op_times]
-    identity_ops = [qml.exp(qml.I(range(num_qubits)), 1j*time) for time in op_times] # For Identity
+    identity_ops = [qml.PhaseShift(0.0, wires=0) for time in op_times] # For Identity
     operator_pool = double_excs + single_excs + identity_ops
+
+    # 4. Z2 Tapering
+    if USE_TAPER:
+        generators = qml.symmetry_generators(hamiltonian)
+        if len(generators) > 0:
+            paulixops = qml.paulix_ops(generators, num_qubits)
+            paulix_sector = qml.qchem.optimal_sector(hamiltonian, generators, num_electrons)
+            
+            # Taper the operator pool
+            tapered_pool = []
+            wire_order = list(range(num_qubits))
+            for op in operator_pool:
+                try:
+                    t_ops = qml.qchem.taper_operation(op, generators, paulixops, paulix_sector, wire_order)
+                    if len(t_ops) > 0:
+                        if len(t_ops) == 1:
+                            tapered_pool.append(t_ops[0])
+                        else:
+                            tapered_pool.append(qml.prod(*t_ops))
+                except Exception:
+                    pass
+            
+            hamiltonian = qml.taper(hamiltonian, generators, paulixops, paulix_sector)
+            hf_state = qml.qchem.taper_hf(generators, paulixops, paulix_sector, num_electrons, num_qubits)
+            operator_pool = tapered_pool
+            
+            qubits_tapered = num_qubits - len(generators)
+            print(f"[Step 4] Z2 Tapered Qubits:    {qubits_tapered} ({len(generators)} symmetry generators found)")
+            num_qubits = qubits_tapered
+        else:
+            print(f"[Step 4] Z2 Tapered Qubits:    {num_qubits} (No symmetry generators found)")
+    else:
+        print(f"[Step 4] Z2 Tapered Qubits:    {num_qubits} (Tapering disabled)")
+        
+    print("--------------------------------------\n")
 
     if use_cdf:
         if source == "qchem":
@@ -342,37 +438,33 @@ def generate_molecule_data(molecule_name="H2", source="qchem", local_dataset_pat
         else:
             molecule = qml.qchem.Molecule(symbols, coords)
 
-        if use_avas:
-            if USE_H2O_OPTIMIZATIONS and molecule_name == "H2O":
-                active_electrons_val = 8
-                active_orbitals_val = 6
-            else:
-                active_electrons_val = num_electrons
-                active_orbitals_val = num_qubits // 2
+        if use_ecp_avas:
+            active_electrons_val = active_electrons_save
+            active_orbitals_val = active_orbitals_save
         else:
             active_electrons_val = molecule.n_electrons
             active_orbitals_val = molecule.n_orbitals
 
         hamiltonian = compute_cdf_hamiltonian(
-            molecule, hamiltonian, use_avas, active_electrons_val, active_orbitals_val, molecule_name
+            molecule, hamiltonian, use_ecp_avas, active_electrons_val, active_orbitals_val, molecule_name
         )
     
     molecule_data[molecule_name] = {
-        "op_pool": np.array(operator_pool), 
+        "op_pool": np.array(operator_pool, dtype=object), 
         "num_qubits": num_qubits,
         "hf_state": hf_state,
         "hamiltonian": hamiltonian,
         "expected_ground_state_E": expected_ground_state_E,
         "symbols": symbols,
         "geometry": coords,
-        "active_electrons": num_electrons,
-        "active_orbitals": num_qubits // 2
+        "active_electrons": active_electrons_save,
+        "active_orbitals": active_orbitals_save,
     }
     
     if source == "pubchem":
         try:
             import pickle
-            cache_suffix = "_avas" if use_avas else ""
+            cache_suffix = "_ecpavas" if use_ecp_avas else ""
             cache_file = os.path.join(local_dataset_path, f"{molecule_name}_pubchem{cache_suffix}.pkl")
             os.makedirs(os.path.dirname(cache_file), exist_ok=True)
             print(f"Caching computed {molecule_name} (pubchem) to: {cache_file}")
@@ -394,7 +486,7 @@ def generate_molecule_data(molecule_name="H2", source="qchem", local_dataset_pat
 # This allows us to extract and compare coordinates, Hamiltonian terms, Hartree-Fock reference states, and the full operator pools of single and double excitations. Note that we will proceed with choice 1 ($\rm H_2O$ via qchem) for the rest of the notebook.
 
 # %%
-target_molecule = "H2O"
+# target_molecule configured at the top of parameters block
 
 # Helper to safely get the length of hamiltonian terms across PL versions
 def get_hamiltonian_terms_len(h):
@@ -403,7 +495,7 @@ def get_hamiltonian_terms_len(h):
     return len(getattr(h, "ops", getattr(h, "operands", [])))
 
 # 1. Load via qchem
-qchem_molecule_data = generate_molecule_data(target_molecule, source="qchem", use_avas=USE_AVAS, use_cdf=USE_CDF_EMISSION)
+qchem_molecule_data = generate_molecule_data(target_molecule, source="qchem", use_ecp_avas=USE_ECP_AVAS, use_cdf=USE_CDF_EMISSION)
 qchem_data = qchem_molecule_data[target_molecule]
 
 print(f"--- {target_molecule} (qchem) ---")
@@ -414,7 +506,7 @@ print(f"FCI Energy: {qchem_data['expected_ground_state_E']}")
 print(f"Hamiltonian terms: {get_hamiltonian_terms_len(qchem_data['hamiltonian'])}")
 
 # 2. Load via PubChem
-pubchem_molecule_data = generate_molecule_data(target_molecule, source="pubchem", use_avas=USE_AVAS, use_cdf=USE_CDF_EMISSION)
+pubchem_molecule_data = generate_molecule_data(target_molecule, source="pubchem", use_ecp_avas=USE_ECP_AVAS, use_cdf=USE_CDF_EMISSION)
 pubchem_data = pubchem_molecule_data[target_molecule]
 
 print(f"\n--- {target_molecule} (PubChem) ---")
@@ -430,6 +522,15 @@ init_state = qchem_data["hf_state"]
 hamiltonian = qchem_data["hamiltonian"]
 grd_E = qchem_data["expected_ground_state_E"]
 op_pool_size = len(op_pool)
+
+# Identify and print the emitter atom
+symbols = qchem_data["symbols"]
+if "I" in symbols:
+    emitter_atom_idx_info = symbols.index("I")
+else:
+    non_h_indices_info = [i for i, sym in enumerate(symbols) if sym != "H"]
+    emitter_atom_idx_info = non_h_indices_info[0] if non_h_indices_info else 0
+print(f"Detected Emitter Atom for OCA: {symbols[emitter_atom_idx_info]} (Index {emitter_atom_idx_info})")
 
 # %% [markdown]
 # # Step 1: Absorption Spectroscopy Simulation
@@ -458,6 +559,64 @@ import pickle
 # Ensure JAX uses float64 for factorization alignment
 config.update("jax_enable_x64", True)
 
+def get_active_space_dipole_operators(symbols, geometry, active_electrons, active_orbitals, use_ecp_avas=False):
+    import numpy as np
+    import pennylane as qml
+    from pyscf import gto, scf
+    from openfermion import FermionOperator, jordan_wigner
+    
+    mol = gto.Mole()
+    mol.atom = list(zip(symbols, geometry))
+    if use_ecp_avas and "I" in symbols:
+        basis_map = {}
+        ecp_map = {}
+        for s in symbols:
+            if s == "I":
+                basis_map[s] = "lanl2dz"
+                ecp_map[s] = "lanl2dz"
+            else:
+                basis_map[s] = "sto-3g"
+        mol.basis = basis_map
+        mol.ecp = ecp_map
+    else:
+        mol.basis = "sto-3g"
+    mol.charge = 0
+    mol.spin = 0
+    mol.unit = "bohr"
+    mol.build(verbose=0)
+    
+    mf = scf.RHF(mol)
+    mf.kernel(verbose=0)
+    
+    r_ao = mol.intor('int1e_r')
+    C = mf.mo_coeff
+    r_mo = np.einsum('pi,kpq,qj->kij', C, r_ao, C)
+    
+    n_electrons = mol.nelectron
+    n_core = (n_electrons // 2) - (active_electrons // 2)
+    active_indices = list(range(n_core, n_core + active_orbitals))
+    
+    core_dipole = np.zeros(3)
+    for i in range(n_core):
+        core_dipole += 2.0 * r_mo[:, i, i]
+        
+    dipole_ops = []
+    for rho in range(3):
+        op = FermionOperator('', core_dipole[rho])
+        for u_idx, u in enumerate(active_indices):
+            for v_idx, v in enumerate(active_indices):
+                coeff = r_mo[rho, u, v]
+                if abs(coeff) < 1e-8:
+                    continue
+                op += FermionOperator(f'{2*u_idx}^ {2*v_idx}', coeff)
+                op += FermionOperator(f'{2*u_idx+1}^ {2*v_idx+1}', coeff)
+                
+        qubit_op = jordan_wigner(op)
+        pl_op = qml.from_openfermion(qubit_op)
+        dipole_ops.append(pl_op)
+        
+    return dipole_ops
+
 # Define absorption caching directory and path
 absorption_cache_dir = os.path.join(current_file_dir, "data", "absorption")
 absorption_cache_path = os.path.join(
@@ -484,16 +643,35 @@ symbols = qchem_data["symbols"]
 geometry = qchem_data["geometry"]
 
 # Build PySCF Mole object and run SCF
-mol = gto.Mole(atom=list(zip(symbols, geometry)), basis="sto-3g", symmetry=None, unit="bohr")
-mol.build(verbose=0)
+if USE_ECP_AVAS and "I" in symbols:
+    mol = gto.Mole()
+    mol.atom = list(zip(symbols, geometry))
+    basis_map = {}
+    ecp_map = {}
+    for s in symbols:
+        if s == "I":
+            basis_map[s] = "lanl2dz"
+            ecp_map[s] = "lanl2dz"
+        else:
+            basis_map[s] = "sto-3g"
+    mol.basis = basis_map
+    mol.ecp = ecp_map
+    mol.charge = 0
+    mol.spin = 0
+    mol.unit = "bohr"
+    mol.build(verbose=0)
+else:
+    mol = gto.Mole(atom=list(zip(symbols, geometry)), basis="sto-3g", symmetry=None, unit="bohr")
+    mol.build(verbose=0)
 
 hf = scf.RHF(mol)
 hf.run(verbose=0)
 
 # Build PennyLane Molecule object and match MO coefficients
-mole = qml.qchem.Molecule(symbols, geometry, basis_name="sto-3g", unit="bohr")
-_, coeffs, _, _, _ = qml.qchem.scf(mole)()
-hf.mo_coeff = coeffs
+if not (USE_ECP_AVAS and "I" in symbols):
+    mole = qml.qchem.Molecule(symbols, geometry, basis_name="sto-3g", unit="bohr")
+    _, coeffs, _, _, _ = qml.qchem.scf(mole)()
+    hf.mo_coeff = coeffs
 
 # Setup active space
 n_cas = qchem_data["active_orbitals"]
@@ -519,17 +697,14 @@ if not use_cache_absorption:
 
 # %% [markdown]
 # ## Step 1.2: Transition Dipole Moments Construction
-# We generate the dipole moment operators in the active space and project the ground state wavefunction to obtain the initial states $\hat{m}_\rho |I\rangle$ along the $x, y, z$ cartesian coordinates.
+# We generate the dipole moment operators in the active space and project the ground state wavefunction to obtain the initial states $\hat{m}_\rho |I\rangle$ along the $x, y, z$ Cartesian coordinates.
 
 # %%
 if not use_cache_absorption:
     # Dipole moment operator in molecular orbital basis
-    core, active = qml.qchem.active_space(
-        mole.n_electrons, mole.n_orbitals, 
-        active_electrons=n_electron_cas, 
-        active_orbitals=n_cas
+    m_rho = get_active_space_dipole_operators(
+        symbols, geometry, n_electron_cas, n_cas, use_ecp_avas=USE_ECP_AVAS
     )
-    m_rho = qml.qchem.dipole_moment(mole, cutoff=1e-8, core=core, active=active)()
     rhos = range(len(m_rho))
 
     wf_dipole = []
@@ -559,7 +734,7 @@ if not use_cache_absorption:
         cdf_res = compute_cdf_hamiltonian(
             molecule=mole,
             hamiltonian=None,
-            use_avas=True,
+            use_ecp_avas=USE_ECP_AVAS,
             active_electrons_val=n_electron_cas,
             active_orbitals_val=n_cas,
             molecule_name="H2O",
@@ -584,7 +759,7 @@ if not use_cache_absorption:
 # %%
 if not use_cache_absorption:
     # Setup simulated device and QNodes
-    device_type = "lightning.qubit"
+    device_type = "lightning.gpu" if USE_CUDA else "lightning.qubit"
     dev_prop = qml.device(device_type, wires=int(2*n_cas) + 1)
 
     # Simulation parameters
@@ -825,86 +1000,18 @@ if USE_CDF_EMISSION and isinstance(hamiltonian, dict) and "core_tensors" in hami
 # %% [markdown]
 # ## Subsequence Energy Evaluation
 #
-# We define backend-specific functions to execute subsequence energy evaluations. For GPU acceleration, CUDA-Q observes the Hamiltonian directly via custom memories and operations. For standard runs, we use PennyLane's `lightning.qubit` simulator.
-#
-# ### CUDA-Q Execution Kernel (Optional)
-#
-# If `USE_CUDAQ` is enabled, we map the PennyLane Hamiltonians to CUDA-Q spin operators and construct specialized kernels to evaluate subsequence expectation values.
+# We define standard PennyLane QNode and subsequence collation function to compute intermediate energies efficiently in a single simulator run using snapshots.
+# If `USE_CUDA=True`, we use the cuQuantum-backed GPU-accelerated simulator `lightning.gpu`, otherwise we default to the standard CPU-backed `lightning.qubit`.
 
 # %%
 import pennylane as qml
 import numpy as np
 
-if USE_CUDAQ:
-    import cudaq
-
-    # 1. Map Hamiltonians
-    def pl_hamiltonian_to_cudaq(pl_ham):
-        ps = qml.pauli.pauli_sentence(pl_ham)
-        cudaq_ham = None
-        for pw, coeff in ps.items():
-            term = None
-            for wire, pauli in pw.items():
-                p_op = getattr(cudaq.spin, pauli.lower())(wire)
-                term = p_op if term is None else term * p_op
-                    
-            term = cudaq.spin.i(0) if term is None else term
-            cudaq_ham = coeff * term if cudaq_ham is None else cudaq_ham + (coeff * term)
-                
-        return cudaq_ham
-
-    # Resolve standard Hamiltonian for CUDA-Q mapping
-    meas_hamiltonian = hamiltonian["standard_hamiltonian"] if isinstance(hamiltonian, dict) and "standard_hamiltonian" in hamiltonian else hamiltonian
-    ham_cudaq = pl_hamiltonian_to_cudaq(meas_hamiltonian)
-
-    # Helper to apply PL ops natively using generators in CUDA-Q
-    def apply_pl_op_to_cudaq(kernel, qubits, op):
-        if isinstance(op, qml.ops.Exp) and isinstance(op.base, qml.Identity): return
-        
-        param = op.parameters[0]
-        ps = qml.pauli.pauli_sentence(op.generator())
-        
-        for pw, coeff in ps.items():
-            term = None
-            for wire, pauli in pw.items():
-                p_op = getattr(cudaq.spin, pauli.lower())(wire)
-                term = p_op if term is None else term * p_op
-                    
-            if term is not None:
-                kernel.exp_pauli(float(param * coeff), qubits, term)
-
-    # Helper to construct HF state kernel
-    def build_base_kernel():
-        kernel = cudaq.make_kernel()
-        qubits = kernel.qalloc(num_qubits)
-        for i, val in enumerate(init_state):
-            if val == 1: kernel.x(qubits[i])
-        return kernel, qubits
-
-    # 2. Build the GQE CUDA-Q subsequence executor
-    def get_subsequence_energies_cudaq(op_seq):
-        energies = []
-        for ops in op_seq:
-            seq_es = []
-            for step in range(1, len(ops) + 1):
-                kernel, qubits = build_base_kernel()
-                for op in ops[:step]:
-                    apply_pl_op_to_cudaq(kernel, qubits, op)
-                seq_es.append(cudaq.observe(kernel, ham_cudaq).expectation())
-            energies.append(seq_es)
-            
-        return np.array(energies)
-
-    # Verify with a tiny sequence
-    print(get_subsequence_energies_cudaq([[op_pool[0], op_pool[1]]]))
-
-# %% [markdown]
-# ### PennyLane Simulator Execution
-#
-# We define the standard PennyLane QNode and subsequence collation function on `lightning.qubit` using snapshots to compute intermediate energies efficiently in a single simulator run.
-
-# %%
-dev = qml.device("lightning.qubit", wires=num_qubits)
+# Select PennyLane device based on USE_CUDA configuration
+if USE_CUDA:
+    dev = qml.device("lightning.gpu", wires=num_qubits)
+else:
+    dev = qml.device("lightning.qubit", wires=num_qubits)
 
 # Resolve standard Hamiltonian if using CDF representation for stats
 meas_hamiltonian = hamiltonian["standard_hamiltonian"] if isinstance(hamiltonian, dict) and "standard_hamiltonian" in hamiltonian else hamiltonian
@@ -920,25 +1027,18 @@ def energy_circuit(gqe_ops):
 
 energy_circuit = qml.snapshots(energy_circuit)
 
-def get_subsequence_energies_pl(op_seq):
+def get_subsequence_energies(op_seq):
     # Collates the energies of each subsequence for a batch of sequences
     energies = []
     for ops in op_seq:
         es = energy_circuit(ops)
         energies.append(
-            [es[k].item() for k in list(range(1, len(ops))) + ["execution_results"]]
+            [float(es[k]) for k in list(range(1, len(ops))) + ["execution_results"]]
         )
     return np.array(energies)
 
-def get_subsequence_energies(op_seq):
-    if USE_CUDAQ:
-        return get_subsequence_energies_cudaq(op_seq)
-    else:
-        return get_subsequence_energies_pl(op_seq)
-
-if not USE_CUDAQ:
-    # Verify with a tiny sequence
-    print(get_subsequence_energies([[op_pool[0], op_pool[1]]]))
+# Verify with a tiny sequence
+print(get_subsequence_energies([[op_pool[0], op_pool[1]]]))
 
 # %% [markdown]
 # ## Dataset Generation
@@ -953,35 +1053,60 @@ import pickle
 current_file_dir = get_current_file_dir()
 
 cache_dir = os.path.join(current_file_dir, "data", "qsceom")
-use_avas_val = globals().get("USE_AVAS", False)
-cache_suffix = "_avas" if use_avas_val else ""
-cache_path = os.path.join(cache_dir, f"qsceom_cache{cache_suffix}.pkl")
+use_ecp_avas_val = globals().get("USE_ECP_AVAS", False)
+use_taper_val = globals().get("USE_TAPER", False)
+setting_suffix = ""
+if use_ecp_avas_val:
+    setting_suffix += "_ecpavas"
+if use_taper_val:
+    setting_suffix += "_taper"
+
+cache_path = os.path.join(cache_dir, f"qsceom_cache{setting_suffix}.pkl")
 has_cache = os.path.exists(cache_path)
 
 seq_len = 4
-trial_name = "trial_h2o"
-if use_avas_val:
-    trial_name += "_avas"
+trial_name = f"trial_h2o{setting_suffix}"
 save_dir = os.path.abspath(os.path.join(current_file_dir, "data", f"seq_len={seq_len}/{trial_name}"))
 
 if not has_cache:
-    # Generate sequence of indices of operators in vocab
-    train_size = 1024
-    os.makedirs(save_dir, exist_ok=True)
+    dataset_cache_file = os.path.join(save_dir, "gqe_dataset.pkl")
+    if os.path.exists(dataset_cache_file):
+        print(f"Loading GQE training dataset from cache: {dataset_cache_file}")
+        with open(dataset_cache_file, "rb") as f:
+            ds_cache = pickle.load(f)
+        train_op_pool_inds = ds_cache["train_op_pool_inds"]
+        train_op_seq = ds_cache["train_op_seq"]
+        train_token_seq = ds_cache["train_token_seq"]
+        train_sub_seq_en = ds_cache["train_sub_seq_en"]
+        train_size = len(train_op_seq)
+    else:
+        # Generate sequence of indices of operators in vocab
+        train_size = 1024
+        os.makedirs(save_dir, exist_ok=True)
 
-    train_op_pool_inds = np.random.randint(op_pool_size, size=(train_size, seq_len))
+        train_op_pool_inds = np.random.randint(op_pool_size, size=(train_size, seq_len))
 
-    # Corresponding sequence of operators
-    train_op_seq = op_pool[train_op_pool_inds]
+        # Corresponding sequence of operators
+        train_op_seq = op_pool[train_op_pool_inds]
 
-    # Corresponding tokens with special starting tokens
-    train_token_seq = np.concatenate([
-        np.zeros(shape=(train_size, 1), dtype=int), # starting token is 0
-        train_op_pool_inds + 1 # shift operator inds by one
-    ], axis=1)
+        # Corresponding tokens with special starting tokens
+        train_token_seq = np.concatenate([
+            np.zeros(shape=(train_size, 1), dtype=int), # starting token is 0
+            train_op_pool_inds + 1 # shift operator inds by one
+        ], axis=1)
 
-    # Calculate the energies for each subsequence in the training set
-    train_sub_seq_en = get_subsequence_energies(train_op_seq)
+        # Calculate the energies for each subsequence in the training set
+        train_sub_seq_en = get_subsequence_energies(train_op_seq)
+
+        # Save to cache
+        print(f"Saving GQE training dataset to cache: {dataset_cache_file}")
+        with open(dataset_cache_file, "wb") as f:
+            pickle.dump({
+                "train_op_pool_inds": train_op_pool_inds,
+                "train_op_seq": train_op_seq,
+                "train_token_seq": train_token_seq,
+                "train_sub_seq_en": train_sub_seq_en,
+            }, f)
 
 # %% [markdown]
 # ## GPTQE and DiTQE Model Architectures
@@ -1239,7 +1364,9 @@ import torch
 import pandas as pd
 from tqdm.auto import tqdm
 
-if torch.backends.mps.is_available():
+if USE_CUDA and torch.cuda.is_available():
+    device = "cuda"
+elif torch.backends.mps.is_available():
     device = "mps"
 elif torch.cuda.is_available():
     device = "cuda"
@@ -1494,18 +1621,38 @@ if 'has_cache' not in globals():
     import os
     current_file_dir = get_current_file_dir()
     cache_dir = os.path.join(current_file_dir, "data", "qsceom")
-    use_avas_val = globals().get("USE_AVAS", False)
-    cache_suffix = "_avas" if use_avas_val else ""
-    cache_path = os.path.join(cache_dir, f"qsceom_cache{cache_suffix}.pkl")
+    use_ecp_avas_val = globals().get("USE_ECP_AVAS", False)
+    use_taper_val = globals().get("USE_TAPER", False)
+    setting_suffix = ""
+    if use_ecp_avas_val:
+        setting_suffix += "_ecpavas"
+    if use_taper_val:
+        setting_suffix += "_taper"
+    cache_path = os.path.join(cache_dir, f"qsceom_cache{setting_suffix}.pkl")
     has_cache = os.path.exists(cache_path)
     seq_len = 4
-    trial_name = "trial_h2o"
-    if use_avas_val:
-        trial_name += "_avas"
+    trial_name = f"trial_h2o{setting_suffix}"
     save_dir = os.path.abspath(os.path.join(current_file_dir, "data", f"seq_len={seq_len}/{trial_name}"))
 
 if not has_cache:
     from qsceom import qscEOM
+
+    # Ensure loaded_true_Es_ and loaded_op_seq_ are defined in memory (even if summary table was loaded from cache)
+    if 'loaded_true_Es_' not in globals() or 'loaded_op_seq_' not in globals():
+        print("Re-evaluating GQE models to extract best ansatz sequence...")
+        loaded = torch.load(f"{save_dir}/gqe.pt", map_location=device, weights_only=False)
+        gen_kwargs = {
+            "n_sequences": 128, 
+            "max_new_tokens": seq_len, 
+            "temperature": 0.001, 
+            "device": device
+        }
+        if USE_DIT:
+            gen_kwargs["energies"] = grd_E
+        loaded_token_seq_, _ = loaded.generate(**gen_kwargs)
+        loaded_inds_ = (loaded_token_seq_[:, 1:] - 1).cpu().numpy()
+        loaded_op_seq_ = op_pool[loaded_inds_]
+        loaded_true_Es_ = get_subsequence_energies(loaded_op_seq_)[:, -1].reshape(-1, 1)
 
     # 1. Identify the best sequence of operations from the trained Generative Quantum Eigensolver (GQE)
     best_seq_idx = np.argmin(loaded_true_Es_)
@@ -1523,23 +1670,16 @@ if not has_cache:
         # Extract the parameter (time/angle) and the wires (excitation indices)
         # This maps the GQE state preparation to standard qscEOM parameterized inputs
         if len(op.parameters) > 0:
-            params.append(float(op.parameters[0]))
+            val = op.parameters[0]
+            params.append(float(val.imag) if np.iscomplexobj(val) else float(val))
             wires = op.wires.tolist()
-            if USE_AVAS and USE_H2O_OPTIMIZATIONS and target_molecule == "H2O":
-                # Shift wires by +2 to map 12-qubit active space to 14-qubit full space
-                wires = [w + 2 for w in wires]
             ash_excitation.append(tuple(wires))
 
     # 3. Retrieve molecule details directly from the in-memory dictionary to prevent redundant downloads/DNS errors!
     symbols = qchem_data["symbols"]
     geometry = qchem_data["geometry"]
-    if USE_AVAS and USE_H2O_OPTIMIZATIONS and target_molecule == "H2O":
-        # qscEOM must run on the full space (10 e-, 7 orbitals) to compute core-ionized states
-        active_electrons = 10
-        active_orbitals = 7
-    else:
-        active_electrons = qchem_data["active_electrons"]
-        active_orbitals = qchem_data["active_orbitals"]
+    active_electrons = qchem_data["active_electrons"]
+    active_orbitals = qchem_data["active_orbitals"]
     charge = 0 # Default calculation assumes a neutral molecule (e.g. H2)
 
     print(f"Preparing q-sc-EOM for {target_molecule}...")
@@ -1567,7 +1707,9 @@ if not has_cache:
         method="openfermion", # Needed to support open shell
         shots=0, 
         return_details=True,
-        outpath=datasets_pyscf_dir
+        outpath=datasets_pyscf_dir,
+        use_ecp_avas=USE_ECP_AVAS,
+        use_taper=USE_TAPER,
     )
     eigs_ip, details_ip = qsceom_ip_res
     print("\nq-sc-EOM IP (N-1) state energies:")
@@ -1588,7 +1730,9 @@ if not has_cache:
         method="openfermion", # Consistency
         shots=0, 
         return_details=True,
-        outpath=datasets_pyscf_dir
+        outpath=datasets_pyscf_dir,
+        use_ecp_avas=USE_ECP_AVAS,
+        use_taper=USE_TAPER,
     )
     eigs_dip, details_dip = qsceom_dip_res
     print("\nq-sc-EOM DIP (N-2) state energies:")
@@ -1610,7 +1754,7 @@ if not has_cache:
         "params": params,
         "ash_excitation": ash_excitation,
         "USE_DIT": USE_DIT if 'USE_DIT' in globals() else False,
-        "USE_AVAS": USE_AVAS if 'USE_AVAS' in globals() else False,
+        "USE_ECP_AVAS": USE_ECP_AVAS if 'USE_ECP_AVAS' in globals() else False,
         "grd_E": grd_E if 'grd_E' in globals() else None,
     }
     with open(cache_path, "wb") as f:
@@ -1653,9 +1797,14 @@ import os
 if 'symbols' not in globals():
     current_file_dir = get_current_file_dir()
     cache_dir = os.path.join(current_file_dir, "data", "qsceom")
-    use_avas_val = globals().get("USE_AVAS", False)
-    cache_suffix = "_avas" if use_avas_val else ""
-    cache_path = os.path.join(cache_dir, f"qsceom_cache{cache_suffix}.pkl")
+    use_ecp_avas_val = globals().get("USE_ECP_AVAS", False)
+    use_taper_val = globals().get("USE_TAPER", False)
+    setting_suffix = ""
+    if use_ecp_avas_val:
+        setting_suffix += "_ecpavas"
+    if use_taper_val:
+        setting_suffix += "_taper"
+    cache_path = os.path.join(cache_dir, f"qsceom_cache{setting_suffix}.pkl")
     if os.path.exists(cache_path):
         print(f"Loading variables from cache for Step 2.2: {cache_path}")
         with open(cache_path, "rb") as f:
@@ -1676,22 +1825,43 @@ if 'symbols' not in globals():
         if cache_data.get("grd_E") is not None:
             grd_E = cache_data["grd_E"]
 
-device = torch.device("mps" if torch.backends.mps.is_available() else "cpu")
+device = torch.device("cuda" if (USE_CUDA and torch.cuda.is_available()) else ("mps" if torch.backends.mps.is_available() else "cpu"))
 
 print("Computing integral data via PySCF with minimal basis projection...")
 print("(Paper Eq. 19: D = T^{-1} U C, where T=MBS overlap, U=MBS-CGTO overlap, C=MO coefficients)")
 
-# 1. Reconstruct molecule and compute RHF in full STO-3G basis
-mol_str = "; ".join([f"{sym} {coord[0]} {coord[1]} {coord[2]}" for sym, coord in zip(symbols, geometry)])
-mol = gto.M(atom=mol_str, basis="sto-3g", charge=charge, symmetry=False)
+# 1. Reconstruct molecule and compute RHF
+mol_str = "; ".join([f"{s} {g[0]} {g[1]} {g[2]}" for s, g in zip(symbols, geometry)])
+
+if USE_ECP_AVAS and "I" in symbols:
+    mol = gto.Mole()
+    mol.atom = mol_str
+    mol.unit = "Bohr"
+    basis_map = {}
+    ecp_map = {}
+    for s in symbols:
+        if s == "I":
+            basis_map[s] = "lanl2dz"
+            ecp_map[s] = "lanl2dz"
+        else:
+            basis_map[s] = "sto-3g"
+    mol.basis = basis_map
+    mol.ecp = ecp_map
+    mol.charge = charge
+    mol.spin = 0
+    mol.build(verbose=0)
+else:
+    mol = gto.M(atom=mol_str, basis="sto-3g", charge=charge, unit="Bohr", symmetry=False)
 mf = scf.RHF(mol)
 mf.kernel(verbose=0)
 
-# 2. Identify emitter atom and its basis functions in STO-3G
-if USE_H2O_OPTIMIZATIONS and target_molecule == "H2O":
-    emitter_atom_idx = 0  # Oxygen in H2O
+# 2. Identify emitter atom and its basis functions
+# Look for Iodine (I) first as the heavy emitter, otherwise fall back to the first non-Hydrogen atom
+if "I" in symbols:
+    emitter_atom_idx = symbols.index("I")
 else:
-    emitter_atom_idx = globals().get("EMITTER_ATOM_INDEX", 0)
+    non_h_indices = [i for i, sym in enumerate(symbols) if sym != "H"]
+    emitter_atom_idx = non_h_indices[0] if non_h_indices else 0
 
 ao_labels = mol.ao_labels(fmt=False)  # List of (atom_idx, angular_momentum, component_idx)
 mbs_indices = [i for i, (atom_idx, *_) in enumerate(ao_labels) if atom_idx == emitter_atom_idx]
@@ -1719,7 +1889,8 @@ C_mbs = np.linalg.inv(T) @ U @ C_full  # MBS coefficients (n_mbs × norb)
 print(f"Projected MO coefficients to MBS: shape {C_mbs.shape}")
 
 # 6. Extract atomic integrals in the AO basis and project using C_mbs
-active_indices = list(range(active_orbitals))
+n_core_auger = (mol.nelectron - active_electrons) // 2
+active_indices = list(range(n_core_auger, n_core_auger + active_orbitals))
 
 import h5py
 
@@ -1864,7 +2035,7 @@ import hvplot.pandas
 hv.extension('matplotlib')
 
 HARTREE_TO_EV = 27.211386245988
-device = torch.device("mps" if torch.backends.mps.is_available() else "cpu")
+device = torch.device("cuda" if (USE_CUDA and torch.cuda.is_available()) else ("mps" if torch.backends.mps.is_available() else "cpu"))
 
 def compute_gamma_pq(C_IP, C_DIP, list_IP, list_DIP, core_idx, n_spin):
     """
@@ -1956,8 +2127,10 @@ for core_spin_idx_try in core_spin_candidates:
         target_ip_state_try = int(np.argmax(overlap_vec_try))
         max_overlap_try = float(np.max(overlap_vec_try))
     else:
-        target_ip_state_try = 0
-        max_overlap_try = 0.0
+        # If tapering or active space reduction is active, the core-ionized state
+        # is the highest energy state (maximum eigenvalue) in the doublet space.
+        target_ip_state_try = int(np.argmax(eigs_ip))
+        max_overlap_try = 1.0
 
     gamma_slice_try = gamma_try[:, target_ip_state_try, :, :]
     gamma_norm_try = float(torch.linalg.vector_norm(gamma_slice_try).item())
@@ -2021,12 +2194,130 @@ Gamma_k_vals = Gamma_k.cpu().numpy()
 print(f"\nComputed Auger Transition Intensities (Gamma_k) for {num_states} states.")
 
 # %% [markdown]
-# ## Step 2.4: Auger Spectrum Broadening and Visualization
+# ## Step 2.4: Classical OpenMolcas Input Generation
 #
 # We compute the Auger electron kinetic energies ($E_{\text{kin}} = E_{\text{IP}} - E_{\text{DIP}}$) and apply Lorentzian broadening with a typical experimental line-width parameter ($\Gamma = 1.5\text{ eV}$) to simulate the final Auger electron spectrum.
+#
+# ### Classical OpenMolcas Reference Setup
+#
+# To plot the classical reference spectrum overlaid with the GQE quantum spectrum, you must copy the pre-computed outputs of the classical CASSCF/RASSI calculation from OpenMolcas into this project.
+#
+# #### 1. Running OpenMolcas
+# Run the calculation in the OpenMolcas build directory, ensuring that you set the `MOLCAS_WORKDIR` variable to `.` to write the scratch transition density files locally:
+# ```bash
+# MOLCAS_WORKDIR=. /Users/nvenkat/anaconda3/envs/qi/bin/python3 ./pymolcas <molecule>_aes.input
+# ```
+#
+# #### 2. Required Files
+# Locate the following outputs generated by the run:
+# - **`{molecule}_aes.rassi.h5`**: The main RASSI output database containing state energies.
+# - **`r2TM_*` files** (e.g., `r2TM_SDA_002_001` through `r2TM_SDA_011_001`): The transition density matrix files containing the spin matrix elements.
+#
+# #### 3. File Destination
+# Copy all of these files into the following directory in this project:
+# `mitsubishi/phase_3/code/data/openmolcas/`
+#
+# Once copied, the parser in Step 2.5 will automatically detect them, run the real-time intensity calculations under the One-Center Approximation (OCA), and display the classical reference alongside your quantum spectrum!
 
 # %%
+def generate_openmolcas_files(target_molecule, symbols, geometry, n_core, n_cas, n_electron_cas, emitter_sym, output_dir=None):
+    if output_dir is None:
+        output_dir = os.path.join(current_file_dir, "data", "openmolcas")
+    os.makedirs(output_dir, exist_ok=True)
+    
+    # 1. Generate XYZ coordinate file (Bohr units)
+    xyz_path = os.path.join(output_dir, f"{target_molecule}.xyz")
+    xyz_lines = [f"{len(symbols)}", f"Coord for {target_molecule} (Bohr)"]
+    for s, (x, y, z) in zip(symbols, geometry):
+        xyz_lines.append(f"{s} {x:.8f} {y:.8f} {z:.8f}")
+    with open(xyz_path, "w") as f:
+        f.write("\n".join(xyz_lines))
+    print(f"Generated OpenMolcas coordinate file at: {xyz_path}")
+    
+    # 2. Generate openmolcas input file (.input)
+    input_path = os.path.join(output_dir, f"{target_molecule.lower()}_aes.input")
+    
+    # Map basis library (STO-3G by default, LANL2DZ for heavy Iodine)
+    basis_section = ""
+    for s in set(symbols):
+        if s == "I":
+            basis_section += f"  I.ECP.lanl2dz.0s.0s.0p.0d.\n"
+        else:
+            basis_section += f"  {s} = STO-3G\n"
+            
+    # Input template using Symmetry = 1 (C1 group, 1 irrep)
+    input_content = f"""# OpenMolcas input file generated automatically for {target_molecule}
+# Active Space CAS({n_electron_cas}e, {n_cas}o)
+>>> EXPORT MOLCAS_PRINT = 2
 
+&GATEWAY
+  Title = {target_molecule} Normal Auger Spectrum
+  Coord = {target_molecule}.xyz
+  Basis = STO-3G
+  Unit = Bohr
+  Symmetry = 1
+
+&SEWARD
+
+&SCF
+  Title = Reference RHF ground state
+
+* --- Step 1: Initial Core-Ionized State (Doublet, N-1 electrons) ---
+&RASSCF
+  Title = Core-ionized initial state
+  Spin = 2
+  Symmetry = 1
+  Inactive = {n_core - 1 if n_core > 0 else 0}
+  RAS1 = 1
+  RAS2 = {n_cas}
+  nActEl = {n_electron_cas + 1} 0 0
+  HEXS
+  1
+  1
+
+>>> COPY $Project.JobIph JOB001
+
+* --- Step 2: Final Doubly-Ionized States (Singlet, N-2 electrons) ---
+&RASSCF
+  Title = Double-hole final states
+  Spin = 1
+  Symmetry = 1
+  Inactive = {n_core}
+  RAS1 = 0
+  RAS2 = {n_cas}
+  nActEl = {n_electron_cas} 0 0
+  CIROOT
+  10 10 1
+
+>>> COPY $Project.JobIph JOB002
+
+* --- Step 3: RASSI Transition Density Matrix Computation ---
+&RASSI
+  NrofJobIphs = 2 all
+  Dyson
+  TDYS
+  1
+  {emitter_sym} 1s
+"""
+    with open(input_path, "w") as f:
+        f.write(input_content)
+    print(f"Generated OpenMolcas input file at: {input_path}")
+
+# Run generator to build inputs for target_molecule
+try:
+    emitter_sym = symbols[emitter_atom_idx]
+    generate_openmolcas_files(target_molecule, symbols, geometry, n_core, n_cas, n_electron_cas, emitter_sym)
+except Exception as e:
+    print(f"Skipping automated OpenMolcas file generation: {e}")
+
+
+# %% [markdown]
+# ## Step 2.5: Auger Spectrum Broadening and Overlay Plotting
+#
+# We compute the Auger electron kinetic energies ($E_{\text{kin}} = E_{\text{IP}} - E_{\text{DIP}}$) and apply Lorentzian broadening with a typical experimental line-width parameter ($\Gamma = 1.5\text{ eV}$) to simulate the final Auger electron spectrum.
+# We then plot the computed GQE quantum spectrum overlaid with the classical reference spectrum (if RASSI outputs are available).
+
+# %%
 # qscEOM eigenvalues are used to compute Auger electron kinetic energy
 # Paper Eq. 14: E_kin^Auger = E_IP(I) - E_DIP(K)
 EIP = float(np.asarray(eigs_ip).flatten()[target_IP_state])
@@ -2048,6 +2339,7 @@ if E_ke_valid.size > 0 and Gamma_ke_valid.size > 0:
     dominant_raw_ke_ev = float(E_ke_valid[dominant_idx])
 
 # Build unshifted spectrum over its natural KE support
+gamma_width_ev = 1.5
 if E_ke_valid.size == 0:
     x_energies = np.linspace(0.0, 1.0, 1000)
     spectrum = np.zeros_like(x_energies, dtype=float)
@@ -2057,7 +2349,6 @@ else:
     x_energies = np.linspace(x_min, x_max, 1500)
     spectrum = np.zeros_like(x_energies, dtype=float)
 
-    gamma_width_ev = 1.5
     for E_k, intensity in zip(E_ke_valid, Gamma_ke_valid):
         spectrum += float(intensity) * (gamma_width_ev / ((x_energies - E_k) ** 2 + gamma_width_ev ** 2))
 
@@ -2088,23 +2379,13 @@ if os.path.exists(spec_out_path) and os.path.getsize(spec_out_path) > 0:
 
 # 2. If cache is empty or missing, compute from RASSI and r2TM_ files in real-time
 if not classical_peaks:
-    raw_rassi_path = os.path.join(current_file_dir, "data", "openmolcas", "h2o_aes.rassi.h5")
-    r2tm_files = [f for f in os.listdir(".") if f.startswith("r2TM_")]
-    if not r2tm_files and os.path.exists(os.path.join(current_file_dir, "data", "openmolcas")):
-        r2tm_files = sorted([f for f in os.listdir(os.path.join(current_file_dir, "data", "openmolcas")) if f.startswith("r2TM_")])
-        r2tm_dir = os.path.join(current_file_dir, "data", "openmolcas")
-    else:
-        r2tm_files = sorted(r2tm_files)
-        r2tm_dir = "."
+    openmolcas_dir = os.path.join(current_file_dir, "data", "openmolcas")
+    r2tm_dir = openmolcas_dir if os.path.exists(openmolcas_dir) else "."
+    r2tm_files = sorted([f for f in os.listdir(r2tm_dir) if f.startswith("r2TM_")])
+    raw_rassi_path = os.path.join(openmolcas_dir, f"{target_molecule.lower()}_aes.rassi.h5")
 
-    if os.path.exists(raw_rassi_path) and r2tm_files:
+    if r2tm_files and os.path.exists(raw_rassi_path):
         print("\n--- Computing Classical Reference Spectrum in Real-Time ---")
-        temp_rassi_path = os.path.join(r2tm_dir, "h2o_aes.rassi.h5")
-        copied_temp = False
-        if not os.path.exists(temp_rassi_path) or os.path.getsize(temp_rassi_path) != os.path.getsize(raw_rassi_path):
-            shutil.copy2(raw_rassi_path, temp_rassi_path)
-            copied_temp = True
-            
         orig_cwd = os.getcwd()
         try:
             with h5py.File(raw_rassi_path, "r") as f_raw:
@@ -2141,9 +2422,9 @@ if not classical_peaks:
                     state_idx = 0
                     
                 vals = list(init2(f))
-                if USE_H2O_OPTIMIZATIONS and target_molecule == "H2O":
-                    if vals[2][0] == "O 1s":
-                        vals[2][0] = "O1 1s"
+                emitter_sym = symbols[emitter_atom_idx]
+                if vals[2][0] == f"{emitter_sym} 1s":
+                    vals[2][0] = f"{emitter_sym}1 1s"
                     
                 hd5_file, basis_id_hd5, element = init3(vals[12], vals[5])
                 
@@ -2190,20 +2471,9 @@ if not classical_peaks:
         except Exception as e:
             print(f"Error computing classical spectrum: {e}")
         finally:
-            if copied_temp and os.path.exists(temp_rassi_path):
-                os.remove(temp_rassi_path)
             os.chdir(orig_cwd)
 
-# 3. Fallback to hardcoded peaks if both loading and real-time computation failed
-if not classical_peaks and USE_H2O_OPTIMIZATIONS and target_molecule == "H2O":
-    print("Falling back to hardcoded precomputed exact benchmarks...")
-    classical_peaks = [
-        (500.49, 0.001367),
-        (498.27, 0.001299),
-        (492.82, 0.001971),
-        (487.00, 0.000028),
-        (478.74, 0.000010)
-    ]
+
         
 # Plot overlay results if classical peaks are available
 df_spectrum_dict = {
@@ -2231,6 +2501,8 @@ ax.set_title("Auger Spectrum: GQE vs Classical Reference")
 ax.set_xlabel("Kinetic Energy (eV)")
 ax.set_ylabel("Normalized Intensity")
 ax.legend(loc="upper left")
+
+ax.set_xlim(400, 575)
 fig.tight_layout()
 
 if SAVE_PLOTS:
