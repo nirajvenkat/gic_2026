@@ -18,6 +18,10 @@ from functools import lru_cache
 import multiprocessing as mp
 from typing import Any, Mapping, Optional, Sequence, Tuple
 
+# Configurable basis and ECP specifications for Iodine (default to def2-SVP for small-core)
+IODINE_BASIS = "def2-SVP"
+IODINE_ECP = "def2-SVP"
+
 from excitations import inite
 
 
@@ -139,8 +143,8 @@ def _build_pyscf_molecular_integrals_ecp(
     ecp_map = {}
     for s in symbols_key:
         if s == "I":
-            basis_map[s] = "lanl2dz"
-            ecp_map[s] = "lanl2dz"
+            basis_map[s] = IODINE_BASIS
+            ecp_map[s] = IODINE_ECP
         else:
             basis_map[s] = "sto-3g"
             
@@ -463,6 +467,56 @@ def _restrict_basis_states_to_number_sector(basis_states, *, active_electrons: i
     select_indices = np.asarray(_jw_number_sector_indices(int(active_electrons), int(qubits)), dtype=int)
     restricted = np.asarray(basis_states[select_indices, :], dtype=complex)
     return restricted, select_indices
+
+
+def reconstruct_untapered_basis(list_tapered, generators, paulixops, paulix_sector, qubits_untapered):
+    """Reconstruct the untapered occupation configurations from tapered ones."""
+    import numpy as np
+    tapered_wires = [op.wires[0] for op in paulixops]
+    untapered_wires = [w for w in range(qubits_untapered) if w not in tapered_wires]
+    
+    generators_support = []
+    for gen in generators:
+        wires_z = set()
+        if hasattr(gen, "wires"):
+            wires_z = set(gen.wires)
+        generators_support.append(wires_z)
+        
+    p_sector = [0 if val == 1 else 1 for val in paulix_sector]
+    list_untapered = []
+    
+    n_tapered = len(tapered_wires)
+    possible_assignments = []
+    for i in range(1 << n_tapered):
+        ass = [(i >> j) & 1 for j in range(n_tapered)]
+        possible_assignments.append(ass)
+        
+    for occ_tapered in list_tapered:
+        x_base = np.zeros(qubits_untapered, dtype=int)
+        for idx in occ_tapered:
+            x_base[untapered_wires[idx]] = 1
+            
+        found = False
+        for ass in possible_assignments:
+            x_candidate = x_base.copy()
+            for idx, w in enumerate(tapered_wires):
+                x_candidate[w] = ass[idx]
+                
+            satisfied = True
+            for k, support in enumerate(generators_support):
+                parity = sum(x_candidate[w] for w in support) % 2
+                if parity != p_sector[k]:
+                    satisfied = False
+                    break
+            if satisfied:
+                occ_untapered = [w for w in range(qubits_untapered) if x_candidate[w] == 1]
+                list_untapered.append(occ_untapered)
+                found = True
+                break
+        if not found:
+            list_untapered.append([untapered_wires[idx] for idx in occ_tapered])
+            
+    return list_untapered
 
 
 def _resolve_worker_count(max_workers: Optional[int]) -> int:
@@ -931,9 +985,12 @@ def qscEOM(
         if pauli_grouping and H is not None and hasattr(H, "compute_grouping"):
             H.compute_grouping(grouping_type=grouping_type)
 
+    generators = []
+    paulixops = []
+    paulix_sector = []
+    qubits_untapered = 2 * int(active_orbitals)
     hf_state = qml.qchem.hf_state(active_electrons, qubits)
     
-    generators = []
     tapered_ansatz = None
     if use_taper and H is not None:
         generators = qml.symmetry_generators(H)
@@ -958,18 +1015,21 @@ def qscEOM(
                     tapered_ansatz.append(t_ops)
                 except Exception:
                     tapered_ansatz.append([])
-
+ 
             H = qml.taper(H, generators, paulixops, paulix_sector)
             hf_state = qml.qchem.taper_hf(generators, paulixops, paulix_sector, active_electrons, qubits)
             
             qubits = qubits - len(generators)
-            list1 = [list(int(v) for v in occ) for occ in inite(active_electrons, qubits)]
-        else:
-            list1 = [list(int(v) for v in occ) for occ in inite(active_electrons, qubits)]
-    else:
-        list1 = [list(int(v) for v in occ) for occ in inite(active_electrons, qubits)]
 
-    singles, doubles = qml.qchem.excitations(active_electrons, qubits + (len(generators) if (use_taper and len(generators) > 0) else 0))
+    ref_occ = [int(i) for i, bit in enumerate(np.asarray(hf_state, dtype=int)) if int(bit) == 1]
+    list1 = [list(int(v) for v in occ) for occ in inite(ref_occ, qubits)]
+    basis_occupations_returned = [list(int(v) for v in occ) for occ in list1]
+    if use_taper and len(generators) > 0:
+        basis_occupations_returned = reconstruct_untapered_basis(
+            list1, generators, paulixops, paulix_sector, qubits_untapered
+        )
+ 
+    singles, doubles = qml.qchem.excitations(active_electrons, qubits_untapered)
     s_wires, d_wires = qml.qchem.excitations_to_wires(singles, doubles)
     wires = range(qubits)
 
@@ -1234,7 +1294,7 @@ def qscEOM(
             "projected_matrix": np.asarray(M_exact, dtype=complex),
             "basis_states": np.asarray(basis_states, dtype=complex),
             "eigenvectors": eigvecs_sorted,
-            "basis_occupations": [list(int(v) for v in occ) for occ in list1],
+            "basis_occupations": basis_occupations_returned,
         }
         details.update(brg_details)
         return values, details
@@ -1417,7 +1477,7 @@ def qscEOM(
     details = {
         "projected_matrix": np.asarray(M, dtype=complex),
         "eigenvectors": eigvecs_sorted,
-        "basis_occupations": [list(int(v) for v in occ) for occ in list1],
+        "basis_occupations": basis_occupations_returned,
     }
     details.update(brg_details)
     return values, details

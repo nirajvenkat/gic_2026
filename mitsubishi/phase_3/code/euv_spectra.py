@@ -75,18 +75,30 @@ current_file_dir = get_current_file_dir()
 #     * **`USE_CDF_EMISSION`**: If `True`, apply CDF to the Auger emission Hamiltonian, yielding a low-rank two-body approximation.
 #     * **`USE_CDF_ABSORPTION`**: If `True`, apply CDF to the absorption spectrum Hamiltonian, using factorized Trotter evolution instead of the full molecular Hamiltonian.
 # * **`ANALYTIC_QUANTUM_ABSORPTION`**: If `True`, use exact (analytic) statevector expectation values for the Hadamard-test measurements in the absorption simulation, removing shot noise. Set to `False` to simulate finite-shot sampling with an exponentially-decaying kernel allocation.
-# * **`SAVE_PLOTS`**: If `True`, export matplotlib rasterized copies of the Auger and absorption spectra to PNG files alongside the interactive hvplot output.
+
 
 # %%
 target_molecule = "H2O"
 USE_CUDA = False
-USE_DIT = True
-USE_ECP_AVAS = True
-USE_TAPER = True
+USE_DIT = False
+USE_ECP_AVAS = False
+USE_TAPER = False
 USE_CDF_EMISSION = False
-USE_CDF_ABSORPTION = True
+USE_CDF_ABSORPTION = False
 ANALYTIC_QUANTUM_ABSORPTION = True
-SAVE_PLOTS = False
+# Hardware-specific active space settings for IMePh / heavy atoms
+if target_molecule in ["IMePh", "4-iodo-2-methylphenol"]:
+    GPU_TARGET = "Mac"  # "B200" (36 qubits/18 orbitals), "H100" (32 qubits/16 orbitals), or "Mac" (30 qubits/15 orbitals)
+    IODINE_BASIS = "def2-SVP"  # "def2-SVP" (small-core ECP keeping 4d explicit) or "lanl2dz" (large-core ECP freezing 4d)
+    IODINE_ECP = "def2-SVP"
+    
+    import qsceom
+    qsceom.IODINE_BASIS = IODINE_BASIS
+    qsceom.IODINE_ECP = IODINE_ECP
+else:
+    GPU_TARGET = None
+    IODINE_BASIS = None
+    IODINE_ECP = None
 
 cache_dir = os.path.join(current_file_dir, "data", "qsceom")
 setting_suffix = ""
@@ -296,11 +308,26 @@ def generate_molecule_data(molecule_name="H2", source="qchem", local_dataset_pat
                             getattr(atom, 'y', 0.0) or 0.0, 
                             getattr(atom, 'z', 0.0) or 0.0] for atom in c.atoms])
         
-    # Build Hamiltonian using ECP + AVAS if enabled
     if use_ecp_avas and "I" in symbols:
-        # Set active space parameters for IMePh (default: 24 electrons, 18 orbitals)
-        active_electrons = 24
-        active_orbitals = 18
+        # Set active space parameters for IMePh based on target hardware capability.
+        # Since Z2 symmetry tapering reduces the simulated qubit count by exactly 2 qubits
+        # (due to alpha/beta spin conservation in a C1 point group molecule), we can offset
+        # the initial active space size by +1 orbital (+2 qubits) when tapering is enabled
+        # to perfectly saturate our hardware limits.
+        taper_offset = 1 if USE_TAPER else 0
+        
+        if GPU_TARGET == "H100":
+            # 8x H100 SXM5 (640 GB VRAM): fits 32 qubits
+            active_orbitals = 16 + taper_offset
+            active_electrons = 16 + (2 * taper_offset)
+        elif GPU_TARGET == "Mac":
+            # Local Apple Silicon Mac (20 GB VRAM): fits 30 qubits
+            active_orbitals = 15 + taper_offset
+            active_electrons = 12 + (2 * taper_offset)
+        else:
+            # Default to 8x B200 SXM6 (1,440 GB VRAM): fits 36 qubits
+            active_orbitals = 18 + taper_offset
+            active_electrons = 24 + (2 * taper_offset)
         
         # Print progress
         print(f"\n--- {molecule_name} Qubit Reduction Progress ---")
@@ -324,14 +351,14 @@ def generate_molecule_data(molecule_name="H2", source="qchem", local_dataset_pat
             ecp_map = {}
             for s in symbols:
                 if s == "I":
-                    basis_map[s] = "lanl2dz"
-                    ecp_map[s] = "lanl2dz"
+                    basis_map[s] = IODINE_BASIS
+                    ecp_map[s] = IODINE_ECP
                 else:
                     basis_map[s] = "sto-3g"
             mol_ecp.basis = basis_map
             mol_ecp.ecp = ecp_map
             mol_ecp.build(verbose=0)
-            print(f"[Step 2] ECP Reduced Qubits:  {2 * mol_ecp.nao} (lanl2dz ECP for I)")
+            print(f"[Step 2] ECP Reduced Qubits:  {2 * mol_ecp.nao} ({IODINE_ECP} ECP for I)")
         except Exception:
             pass
             
@@ -559,7 +586,7 @@ import pickle
 # Ensure JAX uses float64 for factorization alignment
 config.update("jax_enable_x64", True)
 
-def get_active_space_dipole_operators(symbols, geometry, active_electrons, active_orbitals, use_ecp_avas=False):
+def get_active_space_dipole_operators(symbols, geometry, active_electrons, active_orbitals, use_ecp_avas=False, mo_coeff=None):
     import numpy as np
     import pennylane as qml
     from pyscf import gto, scf
@@ -572,8 +599,8 @@ def get_active_space_dipole_operators(symbols, geometry, active_electrons, activ
         ecp_map = {}
         for s in symbols:
             if s == "I":
-                basis_map[s] = "lanl2dz"
-                ecp_map[s] = "lanl2dz"
+                basis_map[s] = IODINE_BASIS
+                ecp_map[s] = IODINE_ECP
             else:
                 basis_map[s] = "sto-3g"
         mol.basis = basis_map
@@ -589,7 +616,7 @@ def get_active_space_dipole_operators(symbols, geometry, active_electrons, activ
     mf.kernel(verbose=0)
     
     r_ao = mol.intor('int1e_r')
-    C = mf.mo_coeff
+    C = mo_coeff if mo_coeff is not None else mf.mo_coeff
     r_mo = np.einsum('pi,kpq,qj->kij', C, r_ao, C)
     
     n_electrons = mol.nelectron
@@ -650,8 +677,8 @@ if USE_ECP_AVAS and "I" in symbols:
     ecp_map = {}
     for s in symbols:
         if s == "I":
-            basis_map[s] = "lanl2dz"
-            ecp_map[s] = "lanl2dz"
+            basis_map[s] = IODINE_BASIS
+            ecp_map[s] = IODINE_ECP
         else:
             basis_map[s] = "sto-3g"
     mol.basis = basis_map
@@ -959,11 +986,6 @@ ax.set_xlabel("Energy (eV)")
 ax.set_ylabel("Absorption (arb.)")
 ax.legend(loc="upper right")
 fig.tight_layout()
-
-if SAVE_PLOTS:
-    plot_path = os.path.join(current_file_dir, "absorption_spectrum.png")
-    fig.savefig(plot_path, dpi=300)
-    print(f"Saved absorption spectrum plot to {plot_path}")
 
 display(fig)
 plt.close(fig)
@@ -1841,8 +1863,8 @@ if USE_ECP_AVAS and "I" in symbols:
     ecp_map = {}
     for s in symbols:
         if s == "I":
-            basis_map[s] = "lanl2dz"
-            ecp_map[s] = "lanl2dz"
+            basis_map[s] = IODINE_BASIS
+            ecp_map[s] = IODINE_ECP
         else:
             basis_map[s] = "sto-3g"
     mol.basis = basis_map
@@ -1908,7 +1930,10 @@ if file_needs_generation:
     print("Attempting fallback to generate integrals from installed 'auger_oca' database...")
     try:
         import sys
-        sys.path.insert(0, os.path.abspath(os.path.join(get_current_file_dir(), "../../external/code/AugerOca")))
+        sys.path.insert(0, get_current_file_dir())
+        import auger_oca.oca_integrals
+        from functools import lru_cache
+        auger_oca.oca_integrals.oca_integrals = lru_cache(maxsize=32)(auger_oca.oca_integrals.oca_integrals)
         from auger_oca.oca_integrals import elmij
         
         # Setup directories
@@ -2241,7 +2266,8 @@ def generate_openmolcas_files(target_molecule, symbols, geometry, n_core, n_cas,
     basis_section = ""
     for s in set(symbols):
         if s == "I":
-            basis_section += f"  I.ECP.lanl2dz.0s.0s.0p.0d.\n"
+            ecp_name = IODINE_ECP if IODINE_ECP is not None else "def2-SVP"
+            basis_section += f"  I.ECP.{ecp_name}.0s.0s.0p.0d.\n"
         else:
             basis_section += f"  {s} = STO-3G\n"
             
@@ -2395,10 +2421,12 @@ if not classical_peaks:
             HARTREE_TO_EV = 27.211386245988
             E_kinetics_ev = (E_IP - E_DIPs) * HARTREE_TO_EV
             
-            sys.path.insert(0, os.path.abspath(os.path.join(get_current_file_dir(), "../../external/code/AugerOca")))
+            sys.path.insert(0, get_current_file_dir())
             # Monkey patch elmij in auger_oca to resolve gc == OCA_c mismatch bug
             import auger_oca.oca_integrals
             import auger_oca.rt2mzz
+            from functools import lru_cache
+            auger_oca.oca_integrals.oca_integrals = lru_cache(maxsize=32)(auger_oca.oca_integrals.oca_integrals)
             orig_elmij = auger_oca.oca_integrals.elmij
             def patched_elmij(OCA_atom, OCA_c, c, i, j, l, m):
                 return orig_elmij(OCA_atom, OCA_c, OCA_c, i, j, l, m)
@@ -2504,11 +2532,6 @@ ax.legend(loc="upper left")
 
 ax.set_xlim(400, 575)
 fig.tight_layout()
-
-if SAVE_PLOTS:
-    plot_path = os.path.join(current_file_dir, "emission_spectrum.png")
-    fig.savefig(plot_path, dpi=300)
-    print(f"Saved emission spectrum plot to {plot_path}")
 
 display(fig)
 plt.close(fig)
