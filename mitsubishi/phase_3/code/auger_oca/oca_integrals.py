@@ -16,11 +16,9 @@
 
 import numpy as np
 import os
-import functools
 
 # oca_integrals.py
 
-@functools.lru_cache(maxsize=32)
 def oca_integrals(OCA_atom):
     # The file OCA.dat has 21 lines of integrals for each element. 
     # The file OCA.3r.dat has 68 lines of integrals for each element.

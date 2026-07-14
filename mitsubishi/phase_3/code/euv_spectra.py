@@ -50,6 +50,11 @@ import os
 import sys
 import pickle
 import matplotlib.pyplot as plt
+try:
+    from IPython.display import display
+except Exception:
+    def display(x):
+        pass
 
 # Resolve absolute paths
 def get_current_file_dir():
@@ -70,7 +75,7 @@ current_file_dir = get_current_file_dir()
 # * **`USE_CUDA`**: If `True`, enable cuQuantum using PennyLane device "lightning.gpu" and enable CUDA kernels in PyTorch through the "cuda" device.
 # * **`USE_DIT`**: If `True`, enable Diffusion Transformer (DIT) for GQE training as an alternative to the auto-regressive GPTnano.
 # * **`USE_ECP_AVAS`**: If `True`, apply Effective Core Potentials (ECP) with active space selection (AVAS) for heavy atoms (like Iodine) to reduce the molecular active space size.
-# * **`USE_TAPER`**: If `True`, apply $Z_2$ symmetry tapering classically to aggressively reduce active qubits.
+# * **`USE_TAPER`**: If `True`, apply $Z_2$ symmetry tapering classically to aggressively reduce active qubits. *Note: Disregarded/disabled for the respective path if CDF is enabled for that path.*
 # * **`USE_CDF_*`**: Enable Compressed Double Factorization (CDF) to calculate a low-rank Hamiltonian approximation with linear scaling.
 #     * **`USE_CDF_EMISSION`**: If `True`, apply CDF to the Auger emission Hamiltonian, yielding a low-rank two-body approximation.
 #     * **`USE_CDF_ABSORPTION`**: If `True`, apply CDF to the absorption spectrum Hamiltonian, using factorized Trotter evolution instead of the full molecular Hamiltonian.
@@ -79,13 +84,15 @@ current_file_dir = get_current_file_dir()
 
 # %%
 target_molecule = "H2O"
+
 USE_CUDA = False
 USE_DIT = False
 USE_ECP_AVAS = False
 USE_TAPER = False
-USE_CDF_EMISSION = False
 USE_CDF_ABSORPTION = False
+USE_CDF_EMISSION = True
 ANALYTIC_QUANTUM_ABSORPTION = True
+
 # Hardware-specific active space settings for IMePh / heavy atoms
 if target_molecule in ["IMePh", "4-iodo-2-methylphenol"]:
     GPU_TARGET = "Mac"  # "B200" (36 qubits/18 orbitals), "H100" (32 qubits/16 orbitals), or "Mac" (30 qubits/15 orbitals)
@@ -225,7 +232,18 @@ def compute_cdf_hamiltonian(molecule, hamiltonian, use_ecp_avas, active_electron
 #    * If `use_cdf=True`, delegates the integral transformation and compressed factorization to `compute_cdf_hamiltonian`.
 
 # %%
-def generate_molecule_data(molecule_name="H2", source="qchem", local_dataset_path=None, use_ecp_avas=False, use_cdf=False):
+def generate_molecule_data(molecule_name="H2", source="qchem", local_dataset_path=None, use_ecp_avas=None, use_cdf=None, use_taper=None):
+    if use_ecp_avas is None:
+        use_ecp_avas = globals().get("USE_ECP_AVAS", False)
+    if use_cdf is None:
+        use_cdf = globals().get("USE_CDF_EMISSION", False)
+    if use_taper is None:
+        use_taper = globals().get("USE_TAPER", False)
+    
+    # Automatically disable Z2 tapering if CDF is enabled for this dataset
+    if use_cdf:
+        use_taper = False
+
     if local_dataset_path is None:
         local_dataset_path = os.path.join(get_current_file_dir(), "data")
     # Get the time set T
@@ -314,7 +332,7 @@ def generate_molecule_data(molecule_name="H2", source="qchem", local_dataset_pat
         # (due to alpha/beta spin conservation in a C1 point group molecule), we can offset
         # the initial active space size by +1 orbital (+2 qubits) when tapering is enabled
         # to perfectly saturate our hardware limits.
-        taper_offset = 1 if USE_TAPER else 0
+        taper_offset = 1 if use_taper else 0
         
         if GPU_TARGET == "H100":
             # 8x H100 SXM5 (640 GB VRAM): fits 32 qubits
@@ -425,7 +443,7 @@ def generate_molecule_data(molecule_name="H2", source="qchem", local_dataset_pat
     operator_pool = double_excs + single_excs + identity_ops
 
     # 4. Z2 Tapering
-    if USE_TAPER:
+    if use_taper:
         generators = qml.symmetry_generators(hamiltonian)
         if len(generators) > 0:
             paulixops = qml.paulix_ops(generators, num_qubits)
@@ -521,27 +539,37 @@ def get_hamiltonian_terms_len(h):
         return len(h["core_tensors"])  # Returns the number of fragments L (including one-body)
     return len(getattr(h, "ops", getattr(h, "operands", [])))
 
-# 1. Load via qchem
-qchem_molecule_data = generate_molecule_data(target_molecule, source="qchem", use_ecp_avas=USE_ECP_AVAS, use_cdf=USE_CDF_EMISSION)
-qchem_data = qchem_molecule_data[target_molecule]
+# Determine path-specific tapering settings for consistency checks in step 1.3
+taper_emission = USE_TAPER and not USE_CDF_EMISSION
+taper_absorption = USE_TAPER and not USE_CDF_ABSORPTION
 
-print(f"--- {target_molecule} (qchem) ---")
+if USE_TAPER and USE_CDF_EMISSION:
+    print("[WARNING] Both USE_TAPER and USE_CDF_EMISSION are set to True.")
+    print("          Z2 tapering is disregarded for the emission path since CDF is enabled.")
+
+if USE_TAPER and USE_CDF_ABSORPTION:
+    print("[WARNING] Both USE_TAPER and USE_CDF_ABSORPTION are set to True.")
+    print("          Z2 tapering is disregarded for the absorption path since CDF is enabled.")
+
+# Try loading via qchem first, fallback to pubchem if not supported/fails
+try:
+    print(f"Attempting to load {target_molecule} via qchem...")
+    molecule_data = generate_molecule_data(target_molecule, source="qchem")
+    qchem_source = "qchem"
+except Exception as e:
+    print(f"qchem source failed/unsupported for {target_molecule}: {e}")
+    print("Falling back to pubchem source...")
+    molecule_data = generate_molecule_data(target_molecule, source="pubchem")
+    qchem_source = "pubchem"
+
+qchem_data = molecule_data[target_molecule]
+
+print(f"--- {target_molecule} ({qchem_source}) ---")
 print(f"Number of Qubits: {qchem_data['num_qubits']}")
 print(f"Operator Pool Size: {len(qchem_data['op_pool'])}")
 print(f"HF State: {qchem_data['hf_state']}")
 print(f"FCI Energy: {qchem_data['expected_ground_state_E']}")
 print(f"Hamiltonian terms: {get_hamiltonian_terms_len(qchem_data['hamiltonian'])}")
-
-# 2. Load via PubChem
-pubchem_molecule_data = generate_molecule_data(target_molecule, source="pubchem", use_ecp_avas=USE_ECP_AVAS, use_cdf=USE_CDF_EMISSION)
-pubchem_data = pubchem_molecule_data[target_molecule]
-
-print(f"\n--- {target_molecule} (PubChem) ---")
-print(f"Number of Qubits: {pubchem_data['num_qubits']}")
-print(f"Operator Pool Size: {len(pubchem_data['op_pool'])}")
-print(f"HF State: {pubchem_data['hf_state']}")
-print(f"FCI Energy: {pubchem_data['expected_ground_state_E']}")
-print(f"Hamiltonian terms: {get_hamiltonian_terms_len(pubchem_data['hamiltonian'])}")
 
 op_pool = qchem_data["op_pool"]
 num_qubits = qchem_data["num_qubits"]
@@ -730,7 +758,7 @@ if not use_cache_absorption:
 if not use_cache_absorption:
     # Dipole moment operator in molecular orbital basis
     m_rho = get_active_space_dipole_operators(
-        symbols, geometry, n_electron_cas, n_cas, use_ecp_avas=USE_ECP_AVAS
+        symbols, geometry, n_electron_cas, n_cas, use_ecp_avas=USE_ECP_AVAS, mo_coeff=hf.mo_coeff
     )
     rhos = range(len(m_rho))
 
@@ -757,27 +785,49 @@ if not use_cache_absorption:
 # %%
 if not use_cache_absorption:
     if USE_CDF_ABSORPTION:
-        # Call the helper method to compute the CDF Hamiltonian representation
-        cdf_res = compute_cdf_hamiltonian(
-            molecule=mole,
-            hamiltonian=None,
-            use_ecp_avas=USE_ECP_AVAS,
-            active_electrons_val=n_electron_cas,
-            active_orbitals_val=n_cas,
-            molecule_name="H2O",
-            use_bliss=False
-        )
+        if isinstance(hamiltonian, dict) and "core_tensors" in hamiltonian:
+            print("Reusing pre-computed CDF Hamiltonian from GQE dataset...")
+            cdf_res = hamiltonian
+        else:
+            print("Computing CDF Hamiltonian for absorption active space...")
+            cdf_res = compute_cdf_hamiltonian(
+                molecule=mole,
+                hamiltonian=None,
+                use_ecp_avas=USE_ECP_AVAS,
+                active_electrons_val=n_electron_cas,
+                active_orbitals_val=n_cas,
+                molecule_name="H2O",
+                use_bliss=False
+            )
 
         core_constant = cdf_res["nuc_constant"]
         _Z = cdf_res["core_tensors"]
         _U = cdf_res["leaf_tensors"]
     else:
-        # Generate the standard molecular Hamiltonian on the active space
-        h_exact, _ = qml.qchem.molecular_hamiltonian(
-            symbols, geometry, active_electrons=n_electron_cas, active_orbitals=n_cas, unit="bohr"
-        )
+        if isinstance(hamiltonian, dict) and "standard_hamiltonian" in hamiltonian and taper_emission == taper_absorption:
+            print("Reusing pre-computed standard Hamiltonian from GQE dataset...")
+            h_exact = hamiltonian["standard_hamiltonian"]
+        elif not isinstance(hamiltonian, dict) and taper_emission == taper_absorption:
+            print("Reusing pre-computed standard Hamiltonian from GQE dataset...")
+            h_exact = hamiltonian
+        else:
+            print("Generating standard molecular Hamiltonian on the active space...")
+            h_exact, _ = qml.qchem.molecular_hamiltonian(
+                symbols, geometry, active_electrons=n_electron_cas, active_orbitals=n_cas, unit="bohr"
+            )
+            if taper_absorption:
+                print("Applying Z2 symmetry tapering to the generated absorption Hamiltonian...")
+                generators = qml.symmetry_generators(h_exact)
+                if len(generators) > 0:
+                    paulixops = qml.paulix_ops(generators, 2 * n_cas)
+                    paulix_sector = qml.qchem.optimal_sector(h_exact, generators, n_electron_cas)
+                    h_exact = qml.taper(h_exact, generators, paulixops, paulix_sector)
+        
         # Map wires of h_exact to [1, ..., 2 * n_cas] to avoid conflict with the control qubit on wire 0
-        h_mapped = qml.map_wires(h_exact, {i: i + 1 for i in range(2 * n_cas)})
+        # If tapered, the number of active qubits in h_exact is reduced to 2 * n_cas - len(generators)
+        # We map its wires to [1, ..., num_active_qubits]
+        n_active_qubits = len(h_exact.wires)
+        h_mapped = qml.map_wires(h_exact, {i: i + 1 for i in range(n_active_qubits)})
 
 # %% [markdown]
 # ## Step 1.4: Quantum Circuit Setup (Hadamard Test & Trotter Evolution)
@@ -867,7 +917,7 @@ if not use_cache_absorption:
             prior_U = first_order_trotter(tau / 2, prior_U=prior_U, 
                                           final_rotation=True, reverse=True)
         else:
-            qml.ctrl(qml.TrotterProduct(h_mapped, time=tau, order=2), control=0)
+            qml.ctrl(qml.TrotterProduct(h_mapped, time=-tau, order=2), control=0)
         return qml.state()
 
     @qml.qnode(dev_prop)
@@ -990,7 +1040,6 @@ fig.tight_layout()
 display(fig)
 plt.close(fig)
 
-# Done
 # %% [markdown]
 # # Step 2: Emission Spectroscopy Simulation
 #
@@ -2109,8 +2158,9 @@ def compute_gamma_pq(C_IP, C_DIP, list_IP, list_DIP, core_idx, n_spin):
                     parity *= (-1) ** c_pos
 
                     # Vectorized tensor contraction for K states (DIPs) and I states (IPs)
-                    bridge_val = np.conj(C_DIP[:, dip_idx]) * parity
-                    gamma_pq[:, :, p, q] += np.outer(bridge_val, C_IP[:, ip_idx])
+                    # Shift index by +1 to account for the identity state at index 0
+                    bridge_val = np.conj(C_DIP[:, dip_idx + 1]) * parity
+                    gamma_pq[:, :, p, q] += np.outer(bridge_val, C_IP[:, ip_idx + 1])
 
     return torch.tensor(gamma_pq, dtype=torch.complex128)
 
@@ -2146,15 +2196,24 @@ for core_spin_idx_try in core_spin_candidates:
     )
 
     core_hole_occ_try = [i for i in full_init_occ if i != core_spin_idx_try]
+    eigs_ip_flat = np.asarray(eigs_ip).flatten()
     if core_hole_occ_try in list_IP:
         core_hole_basis_idx_try = list_IP.index(core_hole_occ_try)
-        overlap_vec_try = np.abs(np.asarray(details_ip["eigenvectors"])[core_hole_basis_idx_try, :]) ** 2
-        target_ip_state_try = int(np.argmax(overlap_vec_try))
-        max_overlap_try = float(np.max(overlap_vec_try))
+        # Shift index by +1 to account for the identity state at index 0
+        overlap_vec_try = np.abs(np.asarray(details_ip["eigenvectors"])[core_hole_basis_idx_try + 1, :]) ** 2
+        
+        # Physical core-hole selection: only consider states with energy > -60.0 Hartree
+        valid_indices = [idx for idx, E in enumerate(eigs_ip_flat) if E > -60.0]
+        if len(valid_indices) > 0:
+            target_ip_state_try = int(valid_indices[np.argmax(overlap_vec_try[valid_indices])])
+            max_overlap_try = float(overlap_vec_try[target_ip_state_try])
+        else:
+            target_ip_state_try = int(np.argmax(overlap_vec_try))
+            max_overlap_try = float(np.max(overlap_vec_try))
     else:
         # If tapering or active space reduction is active, the core-ionized state
         # is the highest energy state (maximum eigenvalue) in the doublet space.
-        target_ip_state_try = int(np.argmax(eigs_ip))
+        target_ip_state_try = int(np.argmax(eigs_ip_flat))
         max_overlap_try = 1.0
 
     gamma_slice_try = gamma_try[:, target_ip_state_try, :, :]
@@ -2348,6 +2407,62 @@ except Exception as e:
 # Paper Eq. 14: E_kin^Auger = E_IP(I) - E_DIP(K)
 EIP = float(np.asarray(eigs_ip).flatten()[target_IP_state])
 EDIPs = np.asarray(eigs_dip).flatten()
+
+# Compute core-hole orbital relaxation dynamically via Delta-SCF with MOM constraint in PySCF
+print("\n--- Computing Core-Hole Orbital Relaxation (Delta-SCF + MOM) ---")
+try:
+    from pyscf import gto, scf
+    from pyscf.scf import addons
+    
+    # Format atom string using current symbols and geometry
+    atom_str = ";".join([f"{s} {c[0]} {c[1]} {c[2]}" for s, c in zip(symbols, geometry)])
+    
+    # Determine charge and basis map
+    charge_gs = 0
+    basis_map = {}
+    ecp_map = {}
+    for s in symbols:
+        if s == "I":
+            basis_map[s] = IODINE_BASIS if IODINE_BASIS else "sto-3g"
+            ecp_map[s] = IODINE_ECP if IODINE_ECP else ""
+        else:
+            basis_map[s] = "sto-3g"
+            
+    mol_gs = gto.M(atom=atom_str, basis=basis_map, ecp=ecp_map, charge=charge_gs, spin=0, unit="Bohr", symmetry=False)
+    mf_gs = scf.RHF(mol_gs)
+    mf_gs.kernel(verbose=0)
+    
+    mol_ch = gto.M(atom=atom_str, basis=basis_map, ecp=ecp_map, charge=charge_gs+1, spin=1, unit="Bohr", symmetry=False)
+    mf_ch = scf.UHF(mol_ch)
+    
+    n_core_auger = (mol_gs.nelectron - active_electrons) // 2
+    nmo = mol_ch.nao_nr()
+    setocc = np.zeros((2, nmo))
+    
+    nocc_alpha = (mol_gs.nelectron // 2)
+    setocc[0, 0:nocc_alpha] = 1.
+    
+    nocc_beta = (mol_gs.nelectron // 2)
+    setocc[1, 0:nocc_beta] = 1.
+    setocc[1, n_core_auger] = 0.  # Remove a beta core electron to create the core hole
+    
+    mo0 = (mf_gs.mo_coeff, mf_gs.mo_coeff)
+    mf_ch = addons.mom_occ(mf_ch, mo0, setocc)
+    mf_ch.kernel(verbose=0)
+    
+    if mf_ch.converged:
+        E_core_relaxed = mf_ch.e_tot
+        relaxation_shift_ev = (E_core_relaxed - EIP) * HARTREE_TO_EV
+        print(f"Unrelaxed GQE Core-Hole Energy: {EIP:.6f} Hartree")
+        print(f"Relaxed Delta-SCF Core-Hole Energy: {E_core_relaxed:.6f} Hartree")
+        print(f"Dynamical Relaxation Shift: {relaxation_shift_ev:.2f} eV")
+        
+        # Update EIP to use the physically relaxed core-hole energy
+        EIP = E_core_relaxed
+    else:
+        print("Warning: Delta-SCF MOM calculation did not converge. Using unrelaxed core-hole energy.")
+except Exception as e:
+    print(f"Could not compute dynamical core-hole relaxation: {e}")
 
 # Auger kinetic energy: emitted electron's KE = difference in ionization levels
 # (single ionization costs more energy than double ionization; difference is carried away by electron)

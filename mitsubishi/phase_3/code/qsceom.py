@@ -1077,7 +1077,8 @@ def qscEOM(
     def _build_circuit_state(dev):
         @qml.qnode(dev)
         def circuit_state_local(params_local, occ, hf_state_local, ash_local, tapered_ansatz_local=None):
-            qml.BasisState(hf_state_local, wires=range(qubits))
+            if use_taper:
+                qml.BasisState(hf_state_local, wires=range(qubits))
             for w in occ:
                 qml.X(wires=w)
             if use_taper and tapered_ansatz_local is not None:
@@ -1094,7 +1095,8 @@ def qscEOM(
     def _build_circuit_d(dev):
         @qml.qnode(dev)
         def circuit_d_local(params_local, occ, wires, s_wires, d_wires, hf_state_local, ash_local, tapered_ansatz_local=None):
-            qml.BasisState(hf_state_local, wires=range(qubits))
+            if use_taper:
+                qml.BasisState(hf_state_local, wires=range(qubits))
             for w in occ:
                 qml.X(wires=w)
             if use_taper and tapered_ansatz_local is not None:
@@ -1111,7 +1113,8 @@ def qscEOM(
     def _build_circuit_od(dev):
         @qml.qnode(dev)
         def circuit_od_local(params_local, occ1, occ2, wires, s_wires, d_wires, hf_state_local, ash_local, tapered_ansatz_local=None):
-            qml.BasisState(hf_state_local, wires=range(qubits))
+            if use_taper:
+                qml.BasisState(hf_state_local, wires=range(qubits))
             for w in occ1:
                 qml.X(wires=w)
             first = -1
