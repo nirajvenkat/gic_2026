@@ -257,13 +257,11 @@ ipython_config.py
 ## QChem datasets
 *.h5
 
-## Only generated PDFs to be ignored
+## Only generated PDFs from prior stages to be ignored
 doe/phase_1/doc/*.pdf
 mitsubishi/phase_1/doc/*.pdf
 doe/phase_2/doc/*.pdf
 mitsubishi/phase_2/doc/*.pdf
-doe/phase_3/doc/*.pdf
-mitsubishi/phase_3/doc/*.pdf
 
 # Ignore .ipynb files in the code directories, since these are handled by jupytext
 doe/phase_2/code/*.ipynb
