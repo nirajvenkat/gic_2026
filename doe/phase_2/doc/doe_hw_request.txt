@@ -1,0 +1,25 @@
+QUANTUM PLATFORM JUSTIFICATION: ENTANGLED TRIO
+Project: U.S. Department of Energy OTC Challenge (Phase 2)
+Objective: Executing Benders-QAMOO quantum algorithm for optimal sizing and siting of components for the U.S. microgrid.
+
+1. PRIMARY MODALITY CHOICE
+IBM Quantum QPUs are requested, since we implement a Samplomatic error mitigation pipeline (PEC+SLC+PNA) that can mitigate device-specific noise to maximize QPU usage. Offline simulation scales up to 30 qubits but cannot replicate hardware noise.
+
+2. BENCHMARKING DETAILS
+* Baseline: 20–30 qubit verification against classical Tensor Network simulation (Qiskit Aer) and validated by Pandapower for AC power-flow feasibility.
+* Target: Production QPU runs vs. classical MIP solvers (CPLEX/Gurobi).
+
+3. TASKS AND SHOTS
+* QPU Job: 320 circuits (10 Pareto points x 32 twirling randomizations) @ 125 shots/circuit = 40,000 shots.
+* Job Volume: 50 to 100 iterative jobs per workflow. Parameter optimization is pre-trained via classical simulation; QPU execution is reserved strictly for quantum Pareto evaluations.
+
+4. QPU ARCHITECTURE JUSTIFICATION
+Requested: 156-qubit Heron-class QPUs (e.g., Kingston, Fez). Alternative: 120-qubit Eagle-class.
+* Scale: Heron supports up to 156 qubits, enabling direct variable encoding of grid cases up to 156 bus widths.
+* Fidelity: Heron's high 2-qubit gate fidelity (>99%) and low cross-talk are required for Samplomatic to resolve the signal (fails on noisier Eagle systems).
+* Integration: Native support for Qiskit Executor primitives.
+
+5. EXPECTED HOURS OF USAGE
+Requested: 3 hours of active QPU runtime.
+* Usage: 200–300 jobs total across several grid cases (eg: IEEE-14, IEEE-33 and their sub-partitions).
+* Tier: Bypasses the 10 min/month IBM Open Plan cap and grants access to IBM Heron.

@@ -85,6 +85,10 @@ target/
 profile_default/
 ipython_config.py
 
+# IDE settings
+.copilotignore
+.vscode/
+
 # pyenv
 #   For a library or package, you might want to ignore these files since the code is
 #   intended to run in multiple environments; otherwise, check them in:
@@ -258,13 +262,20 @@ mitsubishi/phase_1/doc/*.pdf
 doe/phase_2/doc/*.pdf
 mitsubishi/phase_2/doc/*.pdf
 
+# Ignore .ipynb files in the code directories, since these are handled by jupytext
+doe/phase_2/code/*.ipynb
+mitsubishi/phase_2/code/*.ipynb
+
+
 ## Dataset and auxiliary files
 mitsubishi/external/code/data
 mitsubishi/external/code/datasets
 mitsubishi/external/code/runs
 mitsubishi/external/code/seq_*
-mitsubishi/phase_2/code/datasets
+mitsubishi/phase_2/code/data
 mitsubishi/phase_2/code/seq_*
+doe/phase_2/code/data
+doe/phase_2/code/data_benders
 
 ## Bibliography auxiliary files (bibtex/biblatex/biber):
 *.bbl

@@ -588,6 +588,7 @@ def qscEOM(
     active_electrons: int,
     active_orbitals: int,
     charge: int,
+    mult: int = 1,
     params=None,
     ash_excitation=None,
     *,
@@ -611,6 +612,7 @@ def qscEOM(
     brg_tolerance: Optional[float] = None,
     projector_backend: str = "auto",
     return_details: bool = False,
+    outpath: str = ".",
 ):
     """Compute qscEOM eigenvalues from an ansatz state.
 
@@ -787,6 +789,8 @@ def qscEOM(
             active_electrons=active_electrons,
             active_orbitals=active_orbitals,
             charge=charge,
+            mult=mult,
+            outpath=outpath,
         )
         if pauli_grouping and hasattr(H, "compute_grouping"):
             H.compute_grouping(grouping_type=grouping_type)
