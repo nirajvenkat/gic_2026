@@ -89,7 +89,7 @@ USE_CUDA = False
 USE_DIT = False
 USE_ECP_AVAS = False
 USE_TAPER = False
-USE_CDF_ABSORPTION = False
+USE_CDF_ABSORPTION = True
 USE_CDF_EMISSION = True
 ANALYTIC_QUANTUM_ABSORPTION = True
 
@@ -161,7 +161,7 @@ def compute_cdf_hamiltonian(molecule, hamiltonian, use_ecp_avas, active_electron
         )
         V_active = two_mo_of.transpose(0, 3, 1, 2)
         two_body = V_active.transpose(0, 3, 2, 1)
-    elif use_ecp_avas:
+    elif active_electrons_val is not None and active_orbitals_val is not None:
         core_list, active_list = qml.qchem.active_space(
             molecule.n_electrons, molecule.n_orbitals, 
             active_electrons=active_electrons_val, active_orbitals=active_orbitals_val
@@ -173,8 +173,8 @@ def compute_cdf_hamiltonian(molecule, hamiltonian, use_ecp_avas, active_electron
         nuc_core, one_body, two_body = qml.qchem.electron_integrals(molecule)()
 
     # Convert to chemist notation
-    two_chem = qml.math.swapaxes(two_body, 1, 3)  # V_pqrs
-    one_chem = one_body - 0.5 * qml.math.einsum("pqss", two_body)  # T_pq
+    two_chem = qml.math.einsum("prsq->pqrs", two_body)
+    one_chem = one_body - 0.5 * qml.math.einsum("pqrr->pq", two_body)
 
     if use_bliss:
         # Apply Block-Invariant Symmetry Shift (BLISS)
@@ -187,13 +187,15 @@ def compute_cdf_hamiltonian(molecule, hamiltonian, use_ecp_avas, active_electron
         two_shift = two_chem
 
     # Compressed Double Factorization (CDF)
-    factors, two_body_cores, two_body_leaves = qml.qchem.factorize(
-        two_shift, tol_factor=1e-2, cholesky=True, compressed=True, regularization="L2"
-    )
+    # factors, two_body_cores, two_body_leaves = qml.qchem.factorize(
+    #     two_shift, tol_factor=1e-5, cholesky=True, compressed=True, regularization="L2"
+    # )
+    _, two_body_cores, two_body_leaves = qml.qchem.factorize(two_shift, compressed=True)
+
 
     # One-body correction
-    two_core_prime = (qml.math.eye(active_orbitals_val) * two_body_cores.sum(axis=-1)[:, None, :])
-    one_body_extra = qml.math.einsum('tpk,tkk,tqk->pq', two_body_leaves, two_core_prime, two_body_leaves)
+    Z_prime = np.stack([np.diag(np.sum(two_body_cores[i], axis=-1)) for i in range(two_body_cores.shape[0])], axis=0)
+    one_body_extra = qml.math.einsum("tpk,tkk,tqk->pq", two_body_leaves, Z_prime, two_body_leaves)
 
     # Factorize corrected one-body tensor
     one_body_eigvals, one_body_eigvecs = np.linalg.eigh(one_shift + one_body_extra)
@@ -207,8 +209,10 @@ def compute_cdf_hamiltonian(molecule, hamiltonian, use_ecp_avas, active_electron
     )
     reconstruction_error = float(qml.math.norm(two_shift - approx_two_shift))
 
+    nuc_const_val = float(core_shift[0]) if hasattr(core_shift, "__len__") else float(core_shift)
+
     return {
-        "nuc_constant": float(core_shift[0]),
+        "nuc_constant": nuc_const_val,
         "core_tensors": qml.math.concatenate((one_body_cores, two_body_cores), axis=0),
         "leaf_tensors": qml.math.concatenate((one_body_leaves, two_body_leaves), axis=0),
         "reconstruction_error": reconstruction_error,
@@ -785,22 +789,19 @@ if not use_cache_absorption:
 # %%
 if not use_cache_absorption:
     if USE_CDF_ABSORPTION:
-        if isinstance(hamiltonian, dict) and "core_tensors" in hamiltonian:
-            print("Reusing pre-computed CDF Hamiltonian from GQE dataset...")
-            cdf_res = hamiltonian
-        else:
-            print("Computing CDF Hamiltonian for absorption active space...")
-            cdf_res = compute_cdf_hamiltonian(
-                molecule=mole,
-                hamiltonian=None,
-                use_ecp_avas=USE_ECP_AVAS,
-                active_electrons_val=n_electron_cas,
-                active_orbitals_val=n_cas,
-                molecule_name="H2O",
-                use_bliss=False
-            )
+        print("Computing fresh CDF Hamiltonian for absorption active space...")
+        cdf_res = compute_cdf_hamiltonian(
+            molecule=mole,
+            hamiltonian=None,
+            use_ecp_avas=USE_ECP_AVAS,
+            active_electrons_val=n_electron_cas,
+            active_orbitals_val=n_cas,
+            molecule_name="H2O",
+            use_bliss=False
+        )
 
         core_constant = cdf_res["nuc_constant"]
+        cdf_phase_offset = cdf_res.get("cdf_phase_offset", 0.0)
         _Z = cdf_res["core_tensors"]
         _U = cdf_res["leaf_tensors"]
     else:
@@ -977,17 +978,22 @@ if not use_cache_absorption:
 
     # Define range in eV (10 eV to 100 eV)
     wgrid_ev = np.linspace(10.0, 100.0, 10000)
-    wgrid = E_i + wgrid_ev / 27.211386
-    w_min, w_step = wgrid[0], wgrid[1] - wgrid[0]
+    w_rel = wgrid_ev / 27.211386
+    if USE_CDF_ABSORPTION:
+        # CDF evolves with absolute energy, so evaluate on wgrid = E_i + w_rel
+        wgrid_eval = E_i + w_rel
+    else:
+        # Standard TrotterProduct operates on relative active-space Hamiltonian
+        wgrid_eval = w_rel
 
-    spectrum = np.array([f_domain_Greens_func(w) for w in wgrid])
+    spectrum = np.array([f_domain_Greens_func(w) for w in wgrid_eval])
 
     # Compute Classical spectrum reference (FCI / CASCI)
     print("Solving for classical transition dipole moments...")
     mycasci.fcisolver.nroots = 250
     mycasci.run(verbose=0)
     energies = mycasci.e_tot
-    E_i_val = mycasci.e_tot[0]
+    E_i_val = energies[0]
 
     # Determine the dipole integrals using atomic orbitals and convert to molecular orbital basis
     dip_ints_ao = hf.mol.intor("int1e_r_cart", comp=3)
@@ -1000,12 +1006,15 @@ if not use_cache_absorption:
         )
         return qml.math.einsum("xij,ji->x", dip_ints_mo, t_dm1)
 
-    F_m_Is = np.array([final_state_overlap(i) for i in range(len(energies))])
-    spectrum_classical_func = lambda E: (1 / np.pi) * np.sum(
-                    [np.sum(np.abs(F_m_I)**2) * eta / ((E - e)**2 + eta**2)
-                        for (F_m_I, e) in zip(F_m_Is, energies)])
+    # Exclude static ground-state term (index 0)
+    F_m_Is = np.array([final_state_overlap(i) for i in range(1, len(energies))])
+    excitation_energies = energies[1:] - E_i_val
 
-    spectrum_classical = np.array([spectrum_classical_func(w) for w in wgrid])
+    spectrum_classical_func = lambda w: (1 / np.pi) * np.sum(
+                    [np.sum(np.abs(F_m_I)**2) * eta / ((w - w_n)**2 + eta**2)
+                        for (F_m_I, w_n) in zip(F_m_Is, excitation_energies)])
+
+    spectrum_classical = np.array([spectrum_classical_func(w) for w in w_rel])
 
     # Save calculated absorption results to cache
     os.makedirs(absorption_cache_dir, exist_ok=True)
