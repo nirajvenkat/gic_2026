@@ -106,6 +106,8 @@ cache_dir = os.path.join(current_file_dir, "data", "qsceom")
 setting_suffix = ""
 if USE_ECP_AVAS:
     setting_suffix += "_ecpavas"
+if USE_CDF:
+    setting_suffix += "_cdf"
 
 cache_path = os.path.join(cache_dir, f"qsceom_cache{setting_suffix}.pkl")
 has_cache = os.path.exists(cache_path)
@@ -180,9 +182,6 @@ def compute_cdf_hamiltonian(molecule, hamiltonian, use_ecp_avas, active_electron
         two_shift = two_chem
 
     # Compressed Double Factorization (CDF)
-    # factors, two_body_cores, two_body_leaves = qml.qchem.factorize(
-    #     two_shift, tol_factor=1e-5, cholesky=True, compressed=True, regularization="L2"
-    # )
     _, two_body_cores, two_body_leaves = qml.qchem.factorize(two_shift, compressed=True)
 
 
@@ -216,12 +215,30 @@ def compute_cdf_hamiltonian(molecule, hamiltonian, use_ecp_avas, active_electron
         print(f"Compression reduction percentage: {reduction_pct:.2f}%")
         print(f"CDF Hamiltonian reconstruction error (Frobenius norm): {reconstruction_error:.2e}\n")
 
+    if hamiltonian is None:
+        try:
+            from openfermion import InteractionOperator, get_fermion_operator, jordan_wigner
+            from qsceom import _expand_spatial_integrals_to_spin_orbital
+            one_spin, two_spin = _expand_spatial_integrals_to_spin_orbital(one_body, two_body)
+            interaction = InteractionOperator(
+                float(nuc_core),
+                one_spin,
+                two_spin,
+            )
+            ferm_op = get_fermion_operator(interaction)
+            qubit_op = jordan_wigner(ferm_op)
+            standard_hamiltonian = qml.from_openfermion(qubit_op)
+        except Exception:
+            standard_hamiltonian = None
+    else:
+        standard_hamiltonian = hamiltonian
+
     return {
         "nuc_constant": nuc_const_val,
         "core_tensors": qml.math.concatenate((one_body_cores, two_body_cores), axis=0),
         "leaf_tensors": qml.math.concatenate((one_body_leaves, two_body_leaves), axis=0),
         "reconstruction_error": reconstruction_error,
-        "standard_hamiltonian": hamiltonian,
+        "standard_hamiltonian": standard_hamiltonian,
         "n_orbitals": active_orbitals_val,
     }
 
@@ -256,6 +273,8 @@ def generate_molecule_data(molecule_name="H2", source="qchem", local_dataset_pat
     if source == "pubchem":
         import pickle
         cache_suffix = "_ecpavas" if use_ecp_avas else ""
+        if use_cdf:
+            cache_suffix += "_cdf"
         cache_file = os.path.join(local_dataset_path, f"{molecule_name}_pubchem{cache_suffix}.pkl")
         if os.path.exists(cache_file):
             print(f"Loading {molecule_name} (pubchem) from local cache: {cache_file}")
@@ -392,15 +411,18 @@ def generate_molecule_data(molecule_name="H2", source="qchem", local_dataset_pat
             active_orbitals=active_orbitals,
             use_ecp_avas=True,
         )
-        one_spin, two_spin = _expand_spatial_integrals_to_spin_orbital(one_mo, two_mo)
-        interaction = InteractionOperator(
-            float(core_constant),
-            one_spin,
-            two_spin,
-        )
-        ferm_op = get_fermion_operator(interaction)
-        qubit_op = jordan_wigner(ferm_op)
-        hamiltonian = qml.from_openfermion(qubit_op)
+        if not use_cdf:
+            one_spin, two_spin = _expand_spatial_integrals_to_spin_orbital(one_mo, two_mo)
+            interaction = InteractionOperator(
+                float(core_constant),
+                one_spin,
+                two_spin,
+            )
+            ferm_op = get_fermion_operator(interaction)
+            qubit_op = jordan_wigner(ferm_op)
+            hamiltonian = qml.from_openfermion(qubit_op)
+        else:
+            hamiltonian = None
         
         num_qubits = 2 * active_orbitals
         num_electrons = active_electrons
@@ -409,7 +431,11 @@ def generate_molecule_data(molecule_name="H2", source="qchem", local_dataset_pat
     else:
         # Build all-electron molecular Hamiltonian if not already defined (i.e. if pubchem source)
         if source == "pubchem":
-            hamiltonian, num_qubits = qml.qchem.molecular_hamiltonian(symbols, coords, load_data=True)
+            if not use_cdf:
+                hamiltonian, num_qubits = qml.qchem.molecular_hamiltonian(symbols, coords, load_data=True)
+            else:
+                num_qubits = 2 * len(symbols)
+                hamiltonian = None
             
             # Simple estimation of electrons (assuming neutral molecule)
             electron_map = {'H': 1, 'C': 6, 'N': 7, 'O': 8, 'F': 9, 'I': 53}
@@ -451,7 +477,7 @@ def generate_molecule_data(molecule_name="H2", source="qchem", local_dataset_pat
             active_orbitals_val = molecule.n_orbitals
 
         hamiltonian = compute_cdf_hamiltonian(
-            molecule, hamiltonian, use_ecp_avas, active_electrons_val, active_orbitals_val, molecule_name
+            molecule, hamiltonian if not use_cdf else None, use_ecp_avas, active_electrons_val, active_orbitals_val, molecule_name
         )
     
     molecule_data[molecule_name] = {
@@ -994,8 +1020,8 @@ plt.close(fig)
 # 4. Step 2.4: One-Center Approximation (OCA) & Auger Transition Intensities.
 # 5. Step 2.5: Classical OpenMolcas Input Generation.
 # 6. Step 2.6: Auger Spectrum Broadening and Overlay Plotting.
-
-
+#
+#
 
 # %% [markdown]
 # ## Subsequence Energy Evaluation
@@ -1054,9 +1080,12 @@ current_file_dir = get_current_file_dir()
 
 cache_dir = os.path.join(current_file_dir, "data", "qsceom")
 use_ecp_avas_val = globals().get("USE_ECP_AVAS", False)
+use_cdf_val = globals().get("USE_CDF", False)
 setting_suffix = ""
 if use_ecp_avas_val:
     setting_suffix += "_ecpavas"
+if use_cdf_val:
+    setting_suffix += "_cdf"
 
 cache_path = os.path.join(cache_dir, f"qsceom_cache{setting_suffix}.pkl")
 has_cache = os.path.exists(cache_path)
@@ -1619,9 +1648,12 @@ if 'has_cache' not in globals():
     current_file_dir = get_current_file_dir()
     cache_dir = os.path.join(current_file_dir, "data", "qsceom")
     use_ecp_avas_val = globals().get("USE_ECP_AVAS", False)
+    use_cdf_val = globals().get("USE_CDF", False)
     setting_suffix = ""
     if use_ecp_avas_val:
         setting_suffix += "_ecpavas"
+    if use_cdf_val:
+        setting_suffix += "_cdf"
     cache_path = os.path.join(cache_dir, f"qsceom_cache{setting_suffix}.pkl")
     has_cache = os.path.exists(cache_path)
     seq_len = 4
@@ -1790,9 +1822,12 @@ if 'symbols' not in globals():
     current_file_dir = get_current_file_dir()
     cache_dir = os.path.join(current_file_dir, "data", "qsceom")
     use_ecp_avas_val = globals().get("USE_ECP_AVAS", False)
+    use_cdf_val = globals().get("USE_CDF", False)
     setting_suffix = ""
     if use_ecp_avas_val:
         setting_suffix += "_ecpavas"
+    if use_cdf_val:
+        setting_suffix += "_cdf"
     cache_path = os.path.join(cache_dir, f"qsceom_cache{setting_suffix}.pkl")
     if os.path.exists(cache_path):
         print(f"Loading variables from cache for Step 2.2: {cache_path}")
