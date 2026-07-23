@@ -75,10 +75,7 @@ current_file_dir = get_current_file_dir()
 # * **`USE_CUDA`**: If `True`, enable cuQuantum using PennyLane device "lightning.gpu" and enable CUDA kernels in PyTorch through the "cuda" device.
 # * **`USE_DIT`**: If `True`, enable Diffusion Transformer (DIT) for GQE training as an alternative to the auto-regressive GPTnano.
 # * **`USE_ECP_AVAS`**: If `True`, apply Effective Core Potentials (ECP) with active space selection (AVAS) for heavy atoms (like Iodine) to reduce the molecular active space size.
-# * **`USE_TAPER`**: If `True`, apply $Z_2$ symmetry tapering classically to aggressively reduce active qubits. *Note: Disregarded/disabled for the respective path if CDF is enabled for that path.*
-# * **`USE_CDF_*`**: Enable Compressed Double Factorization (CDF) to calculate a low-rank Hamiltonian approximation with linear scaling.
-#     * **`USE_CDF_EMISSION`**: If `True`, apply CDF to the Auger emission Hamiltonian, yielding a low-rank two-body approximation.
-#     * **`USE_CDF_ABSORPTION`**: If `True`, apply CDF to the absorption spectrum Hamiltonian, using factorized Trotter evolution instead of the full molecular Hamiltonian.
+# * **`USE_CDF`**: Enable Compressed Double Factorization (CDF) to calculate low-rank Hamiltonian approximations for both absorption and emission paths.
 # * **`ANALYTIC_QUANTUM_ABSORPTION`**: If `True`, use exact (analytic) statevector expectation values for the Hadamard-test measurements in the absorption simulation, removing shot noise. Set to `False` to simulate finite-shot sampling with an exponentially-decaying kernel allocation.
 
 
@@ -88,9 +85,7 @@ target_molecule = "H2O"
 USE_CUDA = False
 USE_DIT = False
 USE_ECP_AVAS = False
-USE_TAPER = False
-USE_CDF_ABSORPTION = True
-USE_CDF_EMISSION = True
+USE_CDF = True
 ANALYTIC_QUANTUM_ABSORPTION = True
 
 # Hardware-specific active space settings for IMePh / heavy atoms
@@ -111,8 +106,6 @@ cache_dir = os.path.join(current_file_dir, "data", "qsceom")
 setting_suffix = ""
 if USE_ECP_AVAS:
     setting_suffix += "_ecpavas"
-if USE_TAPER:
-    setting_suffix += "_taper"
 
 cache_path = os.path.join(cache_dir, f"qsceom_cache{setting_suffix}.pkl")
 has_cache = os.path.exists(cache_path)
@@ -211,6 +204,18 @@ def compute_cdf_hamiltonian(molecule, hamiltonian, use_ecp_avas, active_electron
 
     nuc_const_val = float(core_shift[0]) if hasattr(core_shift, "__len__") else float(core_shift)
 
+    if active_orbitals_val is not None:
+        df_upper_bound = active_orbitals_val ** 2
+        num_two_body_factors = two_body_cores.shape[0]
+        reduction_pct = (1.0 - num_two_body_factors / df_upper_bound) * 100.0
+        
+        print("\n--- Compressed Double Factorization (CDF) Summary ---")
+        print(f"Active orbitals (N): {active_orbitals_val}")
+        print(f"Double Factorization terms upper bound (N^2): {df_upper_bound}")
+        print(f"Compressed two-body fragments (L): {num_two_body_factors}")
+        print(f"Compression reduction percentage: {reduction_pct:.2f}%")
+        print(f"CDF Hamiltonian reconstruction error (Frobenius norm): {reconstruction_error:.2e}\n")
+
     return {
         "nuc_constant": nuc_const_val,
         "core_tensors": qml.math.concatenate((one_body_cores, two_body_cores), axis=0),
@@ -230,23 +235,15 @@ def compute_cdf_hamiltonian(molecule, hamiltonian, use_ecp_avas, active_electron
 #    * **`pubchem` path**: Dynamically queries the PubChem 3D database (using compound names or CIDs) to fetch geometries for custom target molecules like IMePh.
 # 2. **Effective Core Potential & Active Space Selection (ECP + AVAS)**:
 #    * For Iodine-containing systems (like IMePh), replaces the 46 core electrons with a pseudopotential (LANL2DZ ECP) and extracts a classically constructed CAS(24e, 18o) active space to ensure classical tractability.
-# 3. **Z2 Symmetry Tapering**:
-#    * If `USE_TAPER=True`, finds the Z2 generators of the molecular Hamiltonian and projects the Hamiltonian, HF state, and the operator pool into the optimal sector, reducing the active qubits count by the number of symmetries found.
-# 4. **CDF Integration**:
+# 3. **CDF Integration**:
 #    * If `use_cdf=True`, delegates the integral transformation and compressed factorization to `compute_cdf_hamiltonian`.
 
 # %%
-def generate_molecule_data(molecule_name="H2", source="qchem", local_dataset_path=None, use_ecp_avas=None, use_cdf=None, use_taper=None):
+def generate_molecule_data(molecule_name="H2", source="qchem", local_dataset_path=None, use_ecp_avas=None, use_cdf=None):
     if use_ecp_avas is None:
         use_ecp_avas = globals().get("USE_ECP_AVAS", False)
     if use_cdf is None:
-        use_cdf = globals().get("USE_CDF_EMISSION", False)
-    if use_taper is None:
-        use_taper = globals().get("USE_TAPER", False)
-    
-    # Automatically disable Z2 tapering if CDF is enabled for this dataset
-    if use_cdf:
-        use_taper = False
+        use_cdf = globals().get("USE_CDF", False)
 
     if local_dataset_path is None:
         local_dataset_path = os.path.join(get_current_file_dir(), "data")
@@ -331,25 +328,18 @@ def generate_molecule_data(molecule_name="H2", source="qchem", local_dataset_pat
                             getattr(atom, 'z', 0.0) or 0.0] for atom in c.atoms])
         
     if use_ecp_avas and "I" in symbols:
-        # Set active space parameters for IMePh based on target hardware capability.
-        # Since Z2 symmetry tapering reduces the simulated qubit count by exactly 2 qubits
-        # (due to alpha/beta spin conservation in a C1 point group molecule), we can offset
-        # the initial active space size by +1 orbital (+2 qubits) when tapering is enabled
-        # to perfectly saturate our hardware limits.
-        taper_offset = 1 if use_taper else 0
-        
         if GPU_TARGET == "H100":
             # 8x H100 SXM5 (640 GB VRAM): fits 32 qubits
-            active_orbitals = 16 + taper_offset
-            active_electrons = 16 + (2 * taper_offset)
+            active_orbitals = 16
+            active_electrons = 16
         elif GPU_TARGET == "Mac":
             # Local Apple Silicon Mac (20 GB VRAM): fits 30 qubits
-            active_orbitals = 15 + taper_offset
-            active_electrons = 12 + (2 * taper_offset)
+            active_orbitals = 15
+            active_electrons = 12
         else:
             # Default to 8x B200 SXM6 (1,440 GB VRAM): fits 36 qubits
-            active_orbitals = 18 + taper_offset
-            active_electrons = 24 + (2 * taper_offset)
+            active_orbitals = 18
+            active_electrons = 24
         
         # Print progress
         print(f"\n--- {molecule_name} Qubit Reduction Progress ---")
@@ -445,40 +435,6 @@ def generate_molecule_data(molecule_name="H2", source="qchem", local_dataset_pat
     single_excs = [qml.SingleExcitation(time, wires=single) for single in singles for time in op_times]
     identity_ops = [qml.PhaseShift(0.0, wires=0) for time in op_times] # For Identity
     operator_pool = double_excs + single_excs + identity_ops
-
-    # 4. Z2 Tapering
-    if use_taper:
-        generators = qml.symmetry_generators(hamiltonian)
-        if len(generators) > 0:
-            paulixops = qml.paulix_ops(generators, num_qubits)
-            paulix_sector = qml.qchem.optimal_sector(hamiltonian, generators, num_electrons)
-            
-            # Taper the operator pool
-            tapered_pool = []
-            wire_order = list(range(num_qubits))
-            for op in operator_pool:
-                try:
-                    t_ops = qml.qchem.taper_operation(op, generators, paulixops, paulix_sector, wire_order)
-                    if len(t_ops) > 0:
-                        if len(t_ops) == 1:
-                            tapered_pool.append(t_ops[0])
-                        else:
-                            tapered_pool.append(qml.prod(*t_ops))
-                except Exception:
-                    pass
-            
-            hamiltonian = qml.taper(hamiltonian, generators, paulixops, paulix_sector)
-            hf_state = qml.qchem.taper_hf(generators, paulixops, paulix_sector, num_electrons, num_qubits)
-            operator_pool = tapered_pool
-            
-            qubits_tapered = num_qubits - len(generators)
-            print(f"[Step 4] Z2 Tapered Qubits:    {qubits_tapered} ({len(generators)} symmetry generators found)")
-            num_qubits = qubits_tapered
-        else:
-            print(f"[Step 4] Z2 Tapered Qubits:    {num_qubits} (No symmetry generators found)")
-    else:
-        print(f"[Step 4] Z2 Tapered Qubits:    {num_qubits} (Tapering disabled)")
-        
     print("--------------------------------------\n")
 
     if use_cdf:
@@ -543,19 +499,7 @@ def get_hamiltonian_terms_len(h):
         return len(h["core_tensors"])  # Returns the number of fragments L (including one-body)
     return len(getattr(h, "ops", getattr(h, "operands", [])))
 
-# Determine path-specific tapering settings for consistency checks in step 1.3
-taper_emission = USE_TAPER and not USE_CDF_EMISSION
-taper_absorption = USE_TAPER and not USE_CDF_ABSORPTION
 
-if USE_TAPER and USE_CDF_EMISSION:
-    print("[WARNING] Both USE_TAPER and USE_CDF_EMISSION are set to True.")
-    print("          Z2 tapering is disregarded for the emission path since CDF is enabled.")
-
-if USE_TAPER and USE_CDF_ABSORPTION:
-    print("[WARNING] Both USE_TAPER and USE_CDF_ABSORPTION are set to True.")
-    print("          Z2 tapering is disregarded for the absorption path since CDF is enabled.")
-
-# Try loading via qchem first, fallback to pubchem if not supported/fails
 try:
     print(f"Attempting to load {target_molecule} via qchem...")
     molecule_data = generate_molecule_data(target_molecule, source="qchem")
@@ -680,7 +624,7 @@ def get_active_space_dipole_operators(symbols, geometry, active_electrons, activ
 absorption_cache_dir = os.path.join(current_file_dir, "data", "absorption")
 absorption_cache_path = os.path.join(
     absorption_cache_dir, 
-    f"absorption_cache{'_cdf' if USE_CDF_ABSORPTION else '_nocdf'}.pkl"
+    f"absorption_cache{'_cdf' if USE_CDF else '_nocdf'}.pkl"
 )
 use_cache_absorption = os.path.exists(absorption_cache_path)
 
@@ -788,7 +732,7 @@ if not use_cache_absorption:
 
 # %%
 if not use_cache_absorption:
-    if USE_CDF_ABSORPTION:
+    if USE_CDF:
         print("Computing fresh CDF Hamiltonian for absorption active space...")
         cdf_res = compute_cdf_hamiltonian(
             molecule=mole,
@@ -805,10 +749,10 @@ if not use_cache_absorption:
         _Z = cdf_res["core_tensors"]
         _U = cdf_res["leaf_tensors"]
     else:
-        if isinstance(hamiltonian, dict) and "standard_hamiltonian" in hamiltonian and taper_emission == taper_absorption:
+        if isinstance(hamiltonian, dict) and "standard_hamiltonian" in hamiltonian:
             print("Reusing pre-computed standard Hamiltonian from GQE dataset...")
             h_exact = hamiltonian["standard_hamiltonian"]
-        elif not isinstance(hamiltonian, dict) and taper_emission == taper_absorption:
+        elif not isinstance(hamiltonian, dict):
             print("Reusing pre-computed standard Hamiltonian from GQE dataset...")
             h_exact = hamiltonian
         else:
@@ -816,17 +760,8 @@ if not use_cache_absorption:
             h_exact, _ = qml.qchem.molecular_hamiltonian(
                 symbols, geometry, active_electrons=n_electron_cas, active_orbitals=n_cas, unit="bohr"
             )
-            if taper_absorption:
-                print("Applying Z2 symmetry tapering to the generated absorption Hamiltonian...")
-                generators = qml.symmetry_generators(h_exact)
-                if len(generators) > 0:
-                    paulixops = qml.paulix_ops(generators, 2 * n_cas)
-                    paulix_sector = qml.qchem.optimal_sector(h_exact, generators, n_electron_cas)
-                    h_exact = qml.taper(h_exact, generators, paulixops, paulix_sector)
         
         # Map wires of h_exact to [1, ..., 2 * n_cas] to avoid conflict with the control qubit on wire 0
-        # If tapered, the number of active qubits in h_exact is reduced to 2 * n_cas - len(generators)
-        # We map its wires to [1, ..., num_active_qubits]
         n_active_qubits = len(h_exact.wires)
         h_mapped = qml.map_wires(h_exact, {i: i + 1 for i in range(n_active_qubits)})
 
@@ -851,7 +786,7 @@ if not use_cache_absorption:
         qml.Hadamard(wires=0)
         return qml.state()
 
-    if USE_CDF_ABSORPTION:
+    if USE_CDF:
         def U_rotations(U, control_wires):
             U_spin = qml.math.kron(U, qml.math.eye(2))
             qml.BasisRotation(
@@ -911,7 +846,7 @@ if not use_cache_absorption:
     @qml.qnode(dev_prop)
     def trotter_step_circuit(state_in):
         qml.StatePrep(state_in, wires=dev_prop.wires.tolist())
-        if USE_CDF_ABSORPTION:
+        if USE_CDF:
             prior_U = np.eye(n_cas)
             prior_U = first_order_trotter(tau / 2, prior_U=prior_U, 
                                           final_rotation=False, reverse=False)
@@ -979,7 +914,7 @@ if not use_cache_absorption:
     # Define range in eV (10 eV to 100 eV)
     wgrid_ev = np.linspace(10.0, 100.0, 10000)
     w_rel = wgrid_ev / 27.211386
-    if USE_CDF_ABSORPTION:
+    if USE_CDF:
         # CDF evolves with absolute energy, so evaluate on wgrid = E_i + w_rel
         wgrid_eval = E_i + w_rel
     else:
@@ -1053,29 +988,14 @@ plt.close(fig)
 # # Step 2: Emission Spectroscopy Simulation
 #
 # In this section, we simulate the Auger emission spectrum of $\rm H_2O$ using:
-# 1. Generative Quantum Eigensolver (GQE) to train an optimal reference state.
-# 2. Quantum Self-Consistent Equation-of-Motion (q-sc-EOM) to calculate core-ionized and double-ionization energy levels (IP and DIP spaces).
-# 3. Minimal basis projection and One-Center Approximation (OCA) to compute transition intensities.
-# 4. Lorentzian broadening and visualization.
+# 1. Step 2.1: Generative Quantum Eigensolver (GQE) Model Training & Optimization.
+# 2. Step 2.2: Quantum Self-Consistent Equation-of-Motion (q-sc-EOM) Energy Levels.
+# 3. Step 2.3: Minimal Basis Projection of Atomic Integrals.
+# 4. Step 2.4: One-Center Approximation (OCA) & Auger Transition Intensities.
+# 5. Step 2.5: Classical OpenMolcas Input Generation.
+# 6. Step 2.6: Auger Spectrum Broadening and Overlay Plotting.
 
-# %% [markdown]
-# ## Compressed Double Factorization (CDF) Statistics
-#
-# If CDF is enabled, we display details of the factorization fragments, reconstruction error, and compression ratio.
 
-# %%
-if USE_CDF_EMISSION and isinstance(hamiltonian, dict) and "core_tensors" in hamiltonian:
-    n_orbitals = hamiltonian["n_orbitals"]
-    df_upper_bound = n_orbitals ** 2
-    num_two_body_factors = len(hamiltonian["core_tensors"]) - 1
-    reduction_pct = (1.0 - num_two_body_factors / df_upper_bound) * 100.0
-    
-    print("--- Compressed Double Factorization (CDF) Summary ---")
-    print(f"Active orbitals (N): {n_orbitals}")
-    print(f"Double Factorization terms upper bound (N^2): {df_upper_bound}")
-    print(f"Compressed two-body fragments (L): {num_two_body_factors}")
-    print(f"Compression reduction percentage: {reduction_pct:.2f}%")
-    print(f"CDF Hamiltonian reconstruction error (Frobenius norm): {hamiltonian['reconstruction_error']:.2e}")
 
 # %% [markdown]
 # ## Subsequence Energy Evaluation
@@ -1134,12 +1054,9 @@ current_file_dir = get_current_file_dir()
 
 cache_dir = os.path.join(current_file_dir, "data", "qsceom")
 use_ecp_avas_val = globals().get("USE_ECP_AVAS", False)
-use_taper_val = globals().get("USE_TAPER", False)
 setting_suffix = ""
 if use_ecp_avas_val:
     setting_suffix += "_ecpavas"
-if use_taper_val:
-    setting_suffix += "_taper"
 
 cache_path = os.path.join(cache_dir, f"qsceom_cache{setting_suffix}.pkl")
 has_cache = os.path.exists(cache_path)
@@ -1434,7 +1351,7 @@ class DITQE(GPT):
 
 
 # %% [markdown]
-# ## Model Training and Optimization
+# ## Step 2.1: Generative Quantum Eigensolver (GQE) Model Training and Optimization
 #
 # We configure the model hyperparameters, initialize the optimizer, and train the Generative Quantum Eigensolver (GQE) network. Every 500 epochs, we sample candidate sequences and evaluate their energies to monitor convergence towards the physical ground state.
 
@@ -1690,7 +1607,7 @@ if df_compare_Es is not None:
     display(df_compare_Es)
 
 # %% [markdown]
-# ## Step 2.1: Quantum Self-Consistent Equation-of-Motion (q-sc-EOM)
+# ## Step 2.2: Quantum Self-Consistent Equation-of-Motion (q-sc-EOM)
 #
 # We identify the best ansatz sequence generated by GQE and use it as a reference state. We then execute the q-sc-EOM algorithm to calculate:
 # 1. Core-ionized energy levels (IP space, $N-1$ electrons).
@@ -1702,12 +1619,9 @@ if 'has_cache' not in globals():
     current_file_dir = get_current_file_dir()
     cache_dir = os.path.join(current_file_dir, "data", "qsceom")
     use_ecp_avas_val = globals().get("USE_ECP_AVAS", False)
-    use_taper_val = globals().get("USE_TAPER", False)
     setting_suffix = ""
     if use_ecp_avas_val:
         setting_suffix += "_ecpavas"
-    if use_taper_val:
-        setting_suffix += "_taper"
     cache_path = os.path.join(cache_dir, f"qsceom_cache{setting_suffix}.pkl")
     has_cache = os.path.exists(cache_path)
     seq_len = 4
@@ -1789,7 +1703,6 @@ if not has_cache:
         return_details=True,
         outpath=datasets_pyscf_dir,
         use_ecp_avas=USE_ECP_AVAS,
-        use_taper=USE_TAPER,
     )
     eigs_ip, details_ip = qsceom_ip_res
     print("\nq-sc-EOM IP (N-1) state energies:")
@@ -1812,7 +1725,6 @@ if not has_cache:
         return_details=True,
         outpath=datasets_pyscf_dir,
         use_ecp_avas=USE_ECP_AVAS,
-        use_taper=USE_TAPER,
     )
     eigs_dip, details_dip = qsceom_dip_res
     print("\nq-sc-EOM DIP (N-2) state energies:")
@@ -1861,7 +1773,7 @@ else:
         grd_E = cache_data["grd_E"]
 
 # %% [markdown]
-# ## Step 2.2: Minimal Basis Projection of Atomic Integrals
+# ## Step 2.3: Minimal Basis Projection of Atomic Integrals
 #
 # The One-Center Approximation (OCA) requires transition matrix elements to be restricted to the emitter atom's center. We reconstruct the system in PySCF and project molecular orbital coefficients onto the minimal basis set (MBS) of the emitter atom (Oxygen, index 0).
 
@@ -1878,12 +1790,9 @@ if 'symbols' not in globals():
     current_file_dir = get_current_file_dir()
     cache_dir = os.path.join(current_file_dir, "data", "qsceom")
     use_ecp_avas_val = globals().get("USE_ECP_AVAS", False)
-    use_taper_val = globals().get("USE_TAPER", False)
     setting_suffix = ""
     if use_ecp_avas_val:
         setting_suffix += "_ecpavas"
-    if use_taper_val:
-        setting_suffix += "_taper"
     cache_path = os.path.join(cache_dir, f"qsceom_cache{setting_suffix}.pkl")
     if os.path.exists(cache_path):
         print(f"Loading variables from cache for Step 2.2: {cache_path}")
@@ -2105,7 +2014,7 @@ V_pq_exchange = torch.tensor(np.array(V_pq_exchange_channels), device=device, dt
 print(f"Constructed projected V_pq_direct and V_pq_exchange tensors using OpenMolcas integrals: shape {V_pq_direct.shape}")
 
 # %% [markdown]
-# ## Step 2.3: One-Center Approximation (OCA) & Auger Transition Intensities
+# ## Step 2.4: One-Center Approximation (OCA) & Auger Transition Intensities
 #
 # We calculate the transition reduced density matrix (RDM) $\gamma_{pq}$ between the core-ionized state and double-ionization states, and contract it with the projected atomic integrals to compute Auger transition intensities under Fermi's Golden Rule.
 
@@ -2220,7 +2129,7 @@ for core_spin_idx_try in core_spin_candidates:
             target_ip_state_try = int(np.argmax(overlap_vec_try))
             max_overlap_try = float(np.max(overlap_vec_try))
     else:
-        # If tapering or active space reduction is active, the core-ionized state
+        # If active space reduction is active, the core-ionized state
         # is the highest energy state (maximum eigenvalue) in the doublet space.
         target_ip_state_try = int(np.argmax(eigs_ip_flat))
         max_overlap_try = 1.0
@@ -2287,7 +2196,7 @@ Gamma_k_vals = Gamma_k.cpu().numpy()
 print(f"\nComputed Auger Transition Intensities (Gamma_k) for {num_states} states.")
 
 # %% [markdown]
-# ## Step 2.4: Classical OpenMolcas Input Generation
+# ## Step 2.5: Classical OpenMolcas Input Generation
 #
 # We compute the Auger electron kinetic energies ($E_{\text{kin}} = E_{\text{IP}} - E_{\text{DIP}}$) and apply Lorentzian broadening with a typical experimental line-width parameter ($\Gamma = 1.5\text{ eV}$) to simulate the final Auger electron spectrum.
 #
@@ -2406,7 +2315,7 @@ except Exception as e:
 
 
 # %% [markdown]
-# ## Step 2.5: Auger Spectrum Broadening and Overlay Plotting
+# ## Step 2.6: Auger Spectrum Broadening and Overlay Plotting
 #
 # We compute the Auger electron kinetic energies ($E_{\text{kin}} = E_{\text{IP}} - E_{\text{DIP}}$) and apply Lorentzian broadening with a typical experimental line-width parameter ($\Gamma = 1.5\text{ eV}$) to simulate the final Auger electron spectrum.
 # We then plot the computed GQE quantum spectrum overlaid with the classical reference spectrum (if RASSI outputs are available).

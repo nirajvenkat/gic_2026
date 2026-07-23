@@ -469,54 +469,6 @@ def _restrict_basis_states_to_number_sector(basis_states, *, active_electrons: i
     return restricted, select_indices
 
 
-def reconstruct_untapered_basis(list_tapered, generators, paulixops, paulix_sector, qubits_untapered):
-    """Reconstruct the untapered occupation configurations from tapered ones."""
-    import numpy as np
-    tapered_wires = [op.wires[0] for op in paulixops]
-    untapered_wires = [w for w in range(qubits_untapered) if w not in tapered_wires]
-    
-    generators_support = []
-    for gen in generators:
-        wires_z = set()
-        if hasattr(gen, "wires"):
-            wires_z = set(gen.wires)
-        generators_support.append(wires_z)
-        
-    p_sector = [0 if val == 1 else 1 for val in paulix_sector]
-    list_untapered = []
-    
-    n_tapered = len(tapered_wires)
-    possible_assignments = []
-    for i in range(1 << n_tapered):
-        ass = [(i >> j) & 1 for j in range(n_tapered)]
-        possible_assignments.append(ass)
-        
-    for occ_tapered in list_tapered:
-        x_base = np.zeros(qubits_untapered, dtype=int)
-        for idx in occ_tapered:
-            x_base[untapered_wires[idx]] = 1
-            
-        found = False
-        for ass in possible_assignments:
-            x_candidate = x_base.copy()
-            for idx, w in enumerate(tapered_wires):
-                x_candidate[w] = ass[idx]
-                
-            satisfied = True
-            for k, support in enumerate(generators_support):
-                parity = sum(x_candidate[w] for w in support) % 2
-                if parity != p_sector[k]:
-                    satisfied = False
-                    break
-            if satisfied:
-                occ_untapered = [w for w in range(qubits_untapered) if x_candidate[w] == 1]
-                list_untapered.append(occ_untapered)
-                found = True
-                break
-        if not found:
-            list_untapered.append([untapered_wires[idx] for idx in occ_tapered])
-            
-    return list_untapered
 
 
 def _resolve_worker_count(max_workers: Optional[int]) -> int:
@@ -591,21 +543,13 @@ def _qsceom_worker_init(payload):
     ash_excitation = payload["ash_excitation"]
     list1 = payload["list1"]
     null_state = payload["null_state"]
-    ansatz_type = str(payload["ansatz_type"])
     device_name = payload["device_name"]
-    use_taper = payload.get("use_taper", False)
-    tapered_ansatz = payload.get("tapered_ansatz", None)
 
     dev = _make_device(device_name, qubits, shots, device_kwargs)
 
     def _apply_ansatz_local(params_local, ash_local):
-        if use_taper and tapered_ansatz is not None:
-            for t_ops in tapered_ansatz:
-                for op in t_ops:
-                    qml.apply(op)
-        else:
-            for i, excitations in enumerate(ash_local):
-                _apply_excitation_gate(qml, excitations, params_local[i], ansatz_type)
+        for i, excitations in enumerate(ash_local):
+            _apply_excitation_gate(qml, excitations, params_local[i], ansatz_type)
 
     @qml.qnode(dev)
     def _diag_by_index(idx):
@@ -700,21 +644,13 @@ def _qsceom_state_worker_init(payload):
     ash_excitation = payload["ash_excitation"]
     list1 = payload["list1"]
     null_state = payload["null_state"]
-    ansatz_type = str(payload["ansatz_type"])
     device_name = payload["device_name"]
-    use_taper = payload.get("use_taper", False)
-    tapered_ansatz = payload.get("tapered_ansatz", None)
 
     dev = _make_device(device_name, qubits, device_kwargs)
 
     def _apply_ansatz_local(params_local, ash_local):
-        if use_taper and tapered_ansatz is not None:
-            for t_ops in tapered_ansatz:
-                for op in t_ops:
-                    qml.apply(op)
-        else:
-            for i, excitations in enumerate(ash_local):
-                _apply_excitation_gate(qml, excitations, params_local[i], ansatz_type)
+        for i, excitations in enumerate(ash_local):
+            _apply_excitation_gate(qml, excitations, params_local[i], ansatz_type)
 
     @qml.qnode(dev)
     def _state_by_index(idx):
@@ -776,7 +712,6 @@ def qscEOM(
     return_details: bool = False,
     outpath: str = ".",
     use_ecp_avas: bool = False,
-    use_taper: bool = False,
 ):
     """Compute qscEOM eigenvalues from an ansatz state.
 
@@ -930,11 +865,7 @@ def qscEOM(
             "`pip install numpy pennylane`."
         ) from exc
 
-    resolved_projector_backend = projector_backend
-    resolved_projector_backend = projector_backend
-    if use_taper:
-        resolved_projector_backend = "dense"
-    elif projector_backend == "auto":
+    if projector_backend == "auto":
         if shots == 0 and method_normalized == "pyscf":
             try:
                 import openfermion  # noqa: F401
@@ -985,51 +916,12 @@ def qscEOM(
         if pauli_grouping and H is not None and hasattr(H, "compute_grouping"):
             H.compute_grouping(grouping_type=grouping_type)
 
-    generators = []
-    paulixops = []
-    paulix_sector = []
-    qubits_untapered = 2 * int(active_orbitals)
     hf_state = qml.qchem.hf_state(active_electrons, qubits)
-    
-    tapered_ansatz = None
-    if use_taper and H is not None:
-        generators = qml.symmetry_generators(H)
-        if len(generators) > 0:
-            paulixops = qml.paulix_ops(generators, qubits)
-            paulix_sector = qml.qchem.optimal_sector(H, generators, active_electrons)
-            
-            # Pre-taper the ansatz operations
-            tapered_ansatz = []
-            wire_order = list(range(qubits))
-            for i, exc in enumerate(ash_excitation or []):
-                theta = params[i]
-                if len(exc) == 2:
-                    op = qml.SingleExcitation(theta, wires=exc)
-                elif len(exc) == 4:
-                    op = qml.DoubleExcitation(theta, wires=exc)
-                else:
-                    tapered_ansatz.append([])
-                    continue
-                try:
-                    t_ops = qml.qchem.taper_operation(op, generators, paulixops, paulix_sector, wire_order)
-                    tapered_ansatz.append(t_ops)
-                except Exception:
-                    tapered_ansatz.append([])
- 
-            H = qml.taper(H, generators, paulixops, paulix_sector)
-            hf_state = qml.qchem.taper_hf(generators, paulixops, paulix_sector, active_electrons, qubits)
-            
-            qubits = qubits - len(generators)
-
     ref_occ = [int(i) for i, bit in enumerate(np.asarray(hf_state, dtype=int)) if int(bit) == 1]
     list1 = [list(int(v) for v in occ) for occ in inite(ref_occ, qubits)]
     basis_occupations_returned = [list(int(v) for v in occ) for occ in list1]
-    if use_taper and len(generators) > 0:
-        basis_occupations_returned = reconstruct_untapered_basis(
-            list1, generators, paulixops, paulix_sector, qubits_untapered
-        )
- 
-    singles, doubles = qml.qchem.excitations(active_electrons, qubits_untapered)
+
+    singles, doubles = qml.qchem.excitations(active_electrons, qubits)
     s_wires, d_wires = qml.qchem.excitations_to_wires(singles, doubles)
     wires = range(qubits)
 
@@ -1076,45 +968,29 @@ def qscEOM(
 
     def _build_circuit_state(dev):
         @qml.qnode(dev)
-        def circuit_state_local(params_local, occ, hf_state_local, ash_local, tapered_ansatz_local=None):
-            if use_taper:
-                qml.BasisState(hf_state_local, wires=range(qubits))
+        def circuit_state_local(params_local, occ, hf_state_local, ash_local):
             for w in occ:
                 qml.X(wires=w)
-            if use_taper and tapered_ansatz_local is not None:
-                for t_ops in tapered_ansatz_local:
-                    for op in t_ops:
-                        qml.apply(op)
-            else:
-                for i, excitations in enumerate(ash_local):
-                    _apply_excitation_gate(qml, excitations, params_local[i], ansatz_type)
+            for i, excitations in enumerate(ash_local):
+                _apply_excitation_gate(qml, excitations, params_local[i], ansatz_type)
             return qml.state()
 
         return circuit_state_local
 
     def _build_circuit_d(dev):
         @qml.qnode(dev)
-        def circuit_d_local(params_local, occ, wires, s_wires, d_wires, hf_state_local, ash_local, tapered_ansatz_local=None):
-            if use_taper:
-                qml.BasisState(hf_state_local, wires=range(qubits))
+        def circuit_d_local(params_local, occ, wires, s_wires, d_wires, hf_state_local, ash_local):
             for w in occ:
                 qml.X(wires=w)
-            if use_taper and tapered_ansatz_local is not None:
-                for t_ops in tapered_ansatz_local:
-                    for op in t_ops:
-                        qml.apply(op)
-            else:
-                for i, excitations in enumerate(ash_local):
-                    _apply_excitation_gate(qml, excitations, params_local[i], ansatz_type)
+            for i, excitations in enumerate(ash_local):
+                _apply_excitation_gate(qml, excitations, params_local[i], ansatz_type)
             return qml.expval(H)
 
         return circuit_d_local
 
     def _build_circuit_od(dev):
         @qml.qnode(dev)
-        def circuit_od_local(params_local, occ1, occ2, wires, s_wires, d_wires, hf_state_local, ash_local, tapered_ansatz_local=None):
-            if use_taper:
-                qml.BasisState(hf_state_local, wires=range(qubits))
+        def circuit_od_local(params_local, occ1, occ2, wires, s_wires, d_wires, hf_state_local, ash_local):
             for w in occ1:
                 qml.X(wires=w)
             first = -1
@@ -1132,13 +1008,8 @@ def qscEOM(
                         qml.Hadamard(wires=v)
                     else:
                         qml.CNOT(wires=[first, v])
-            if use_taper and tapered_ansatz_local is not None:
-                for t_ops in tapered_ansatz_local:
-                    for op in t_ops:
-                        qml.apply(op)
-            else:
-                for i, excitations in enumerate(ash_local):
-                    _apply_excitation_gate(qml, excitations, params_local[i], ansatz_type)
+            for i, excitations in enumerate(ash_local):
+                _apply_excitation_gate(qml, excitations, params_local[i], ansatz_type)
             return qml.expval(H)
 
         return circuit_od_local
@@ -1173,7 +1044,6 @@ def qscEOM(
                         list1[idx],
                         null_state,
                         ash_excitation,
-                        tapered_ansatz,
                     ),
                     dtype=complex,
                 )
@@ -1198,8 +1068,6 @@ def qscEOM(
                         "ansatz_type": ansatz_type,
                         "device_name": device_name,
                         "device_kwargs": device_kwargs_local,
-                        "use_taper": use_taper,
-                        "tapered_ansatz": tapered_ansatz,
                     }
                     try:
                         mp_context = mp.get_context("fork")
@@ -1317,8 +1185,6 @@ def qscEOM(
                 "ansatz_type": ansatz_type,
                 "device_name": device_name,
                 "device_kwargs": device_kwargs_local,
-                "use_taper": use_taper,
-                "tapered_ansatz": tapered_ansatz,
             }
             try:
                 mp_context = mp.get_context("fork")
@@ -1342,7 +1208,7 @@ def qscEOM(
         circuit_d_local = _build_circuit_d(local_dev)
         out = {}
         for idx in chunk_indices:
-            value = circuit_d_local(params, list1[idx], wires, s_wires, d_wires, null_state, ash_excitation, tapered_ansatz)
+            value = circuit_d_local(params, list1[idx], wires, s_wires, d_wires, null_state, ash_excitation)
             out[idx] = _to_real_scalar(value)
         return out
 
@@ -1360,7 +1226,6 @@ def qscEOM(
                 d_wires,
                 null_state,
                 ash_excitation,
-                tapered_ansatz,
             )
             value = _to_real_scalar(mtmp) - diagonal_values[i] / 2.0 - diagonal_values[j] / 2.0
             out[(i, j)] = float(value)
@@ -1394,7 +1259,7 @@ def qscEOM(
             circuit_d = _build_circuit_d(dev)
             for i in diagonal_indices:
                 M[i, i] = _to_real_scalar(
-                    circuit_d(params, list1[i], wires, s_wires, d_wires, null_state, ash_excitation, tapered_ansatz)
+                    circuit_d(params, list1[i], wires, s_wires, d_wires, null_state, ash_excitation)
                 )
 
         if symmetric:
@@ -1445,7 +1310,6 @@ def qscEOM(
                             d_wires,
                             null_state,
                             ash_excitation,
-                            tapered_ansatz,
                         )
                         value = _to_real_scalar(mtmp) - M[i, i] / 2.0 - M[j, j] / 2.0
                         M[i, j] = value
@@ -1463,7 +1327,6 @@ def qscEOM(
                                 d_wires,
                                 null_state,
                                 ash_excitation,
-                                tapered_ansatz,
                             )
                             M[i, j] = _to_real_scalar(mtmp) - M[i, i] / 2.0 - M[j, j] / 2.0
     finally:
