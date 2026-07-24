@@ -1166,10 +1166,15 @@ def energy_circuit(gqe_ops):
 
 energy_circuit = qml.snapshots(energy_circuit)
 
+try:
+    from tqdm.auto import tqdm
+except ImportError:
+    from tqdm import tqdm
+
 def get_subsequence_energies(op_seq):
     # Collates the energies of each subsequence for a batch of sequences
     energies = []
-    for ops in op_seq:
+    for ops in tqdm(op_seq, desc="Evaluating Subsequence Energies", unit="seq"):
         es = energy_circuit(ops)
         energies.append(
             [float(es[k]) for k in list(range(1, len(ops))) + ["execution_results"]]
