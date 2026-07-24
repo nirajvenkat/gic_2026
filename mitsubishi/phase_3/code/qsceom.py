@@ -1031,23 +1031,11 @@ def qscEOM(
     # This preserves Rayleigh-Ritz variational behavior (with include_identity=True, the
     # ADAPT state is included in the subspace).
     if shots == 0:
-        state_map = {}
-
-        def _state_chunk(chunk_indices):
-            local_dev = _make_device(device_name, qubits)
-            circuit_state_local = _build_circuit_state(local_dev)
-            out = {}
-            for idx in chunk_indices:
-                out[idx] = np.asarray(
-                    circuit_state_local(
-                        params,
-                        list1[idx],
-                        null_state,
-                        ash_excitation,
-                    ),
-                    dtype=complex,
-                )
-            return out
+        try:
+            from tqdm.auto import tqdm
+            pbar = tqdm(total=n_states, desc=f"qscEOM Basis States ({active_electrons}e, {active_orbitals}o)", unit="state")
+        except ImportError:
+            pbar = None
 
         if parallel_matrix and worker_count > 1 and n_states > 1:
             chunk_size = _resolve_chunk_size(
@@ -1094,14 +1082,36 @@ def qscEOM(
                     else:
                         futures = [state_executor.submit(_state_chunk, chunk) for chunk in chunked_indices]
                     for future in as_completed(futures):
-                        state_map.update(future.result())
+                        res = future.result()
+                        state_map.update(res)
+                        if pbar is not None:
+                            pbar.update(len(res))
                 else:
-                    state_map.update(_state_chunk(list(range(n_states))))
+                    for idx in range(n_states):
+                        state_map.update(_state_chunk([idx]))
+                        if pbar is not None:
+                            pbar.update(1)
             finally:
                 if state_executor is not None:
                     state_executor.shutdown(wait=True)
         else:
-            state_map.update(_state_chunk(list(range(n_states))))
+            local_dev = _make_device(device_name, qubits)
+            circuit_state_local = _build_circuit_state(local_dev)
+            for idx in range(n_states):
+                state_map[idx] = np.asarray(
+                    circuit_state_local(
+                        params,
+                        list1[idx],
+                        null_state,
+                        ash_excitation,
+                    ),
+                    dtype=complex,
+                )
+                if pbar is not None:
+                    pbar.update(1)
+
+        if pbar is not None:
+            pbar.close()
 
         basis_states = np.column_stack([state_map[i] for i in range(n_states)])
         if resolved_projector_backend == "sparse_number_preserving":

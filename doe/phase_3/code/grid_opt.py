@@ -40,6 +40,9 @@
 # Here is a diagram that illustrates the Benders-QAMOO workflow:
 
 # %% [markdown]
+# ![bq](../../img/phase0.png)
+
+# %% [markdown]
 # ![bq](../../img/benders_qamoo.png)
 
 # %%

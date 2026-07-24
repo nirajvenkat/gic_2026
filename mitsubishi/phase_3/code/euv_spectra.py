@@ -72,7 +72,7 @@ current_file_dir = get_current_file_dir()
 #
 # Configure the execution parameters for the simulation:
 #
-# * **`USE_CUDA`**: If `True`, enable cuQuantum using PennyLane device "lightning.gpu" and enable CUDA kernels in PyTorch through the "cuda" device.
+# * **`HARDWARE_TARGET`**: Target hardware execution platform. Choose between `"Mac"` (local Apple Silicon Mac), `"H100"` (8x NVIDIA H100 GPU cluster), and `"B200"` (8x NVIDIA B200 GPU cluster). Automatically manages `USE_CUDA` and active-space qubit allocations.
 # * **`USE_DIT`**: If `True`, enable Diffusion Transformer (DIT) for GQE training as an alternative to the auto-regressive GPTnano.
 # * **`USE_ORBITAL_PREP`**: If `True`, apply pre-quantum classical orbital and integral preprocessing (ECP, AVAS, CVS) for heavy atoms to reduce/separate the molecular space before qubit mapping.
 # * **`USE_CDF`**: Enable Compressed Double Factorization (CDF) to calculate low-rank Hamiltonian approximations for both absorption and emission paths.
@@ -80,18 +80,26 @@ current_file_dir = get_current_file_dir()
 
 
 # %%
-target_molecule = "H2O"
+target_molecule = "IMePh"
 
-USE_CUDA = False
+HARDWARE_TARGET = "Mac"  # Options: "Mac" (Apple Silicon Mac), "H100" (8x H100 SXM5), "B200" (8x B200 SXM6)
 USE_DIT = False
-USE_ORBITAL_PREP = False
+USE_ORBITAL_PREP = True
 USE_CDF = True
 USE_BLISS = None  # Options: "lp" (our LP-BLISS), "pl" (PennyLane symmetry_shift), or None / False
 USE_ANALYTIC_ABSORPTION = True
 
-# Hardware-specific active space settings for IMePh / heavy atoms
+# Hardware-specific auto-configuration
+import torch
+if HARDWARE_TARGET in ["H100", "B200"]:
+    USE_CUDA = torch.cuda.is_available()
+    GPU_TARGET = HARDWARE_TARGET
+else:
+    USE_CUDA = False
+    GPU_TARGET = "Mac"
+
+# Iodine ECP settings for heavy-atom target molecules
 if target_molecule in ["IMePh", "4-iodo-2-methylphenol"]:
-    GPU_TARGET = "Mac"  # "B200" (36 qubits/18 orbitals), "H100" (32 qubits/16 orbitals), or "Mac" (20 qubits/10 orbitals)
     IODINE_BASIS = "def2-SVP"  # "def2-SVP" (small-core ECP keeping 4d explicit) or "lanl2dz" (large-core ECP freezing 4d)
     IODINE_ECP = "def2-SVP"
     
@@ -99,7 +107,6 @@ if target_molecule in ["IMePh", "4-iodo-2-methylphenol"]:
     qsceom.IODINE_BASIS = IODINE_BASIS
     qsceom.IODINE_ECP = IODINE_ECP
 else:
-    GPU_TARGET = None
     IODINE_BASIS = None
     IODINE_ECP = None
 
@@ -114,7 +121,7 @@ if USE_BLISS == "lp":
 elif USE_BLISS == "pl":
     setting_suffix += "_blisspl"
 
-cache_path = os.path.join(cache_dir, f"qsceom_cache{setting_suffix}.pkl")
+cache_path = os.path.join(cache_dir, f"qsceom_cache_{target_molecule.lower()}{setting_suffix}.pkl")
 has_cache = os.path.exists(cache_path)
 openmolcas_filepath = os.path.abspath(os.path.join(current_file_dir, "data", "openmolcas", f"{target_molecule.lower()}_aes.gqe_integrals.h5"))
 
@@ -416,7 +423,7 @@ def generate_molecule_data(molecule_name="H2", source="qchem", local_dataset_pat
 
         # Construct H from ECP integrals classically
         import sys
-        sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+        sys.path.insert(0, current_file_dir)
         from qsceom import _build_pyscf_molecular_integrals, _expand_spatial_integrals_to_spin_orbital
         from openfermion import InteractionOperator, get_fermion_operator, jordan_wigner
         
@@ -485,7 +492,20 @@ def generate_molecule_data(molecule_name="H2", source="qchem", local_dataset_pat
         if source == "qchem":
             molecule = dataset.molecule
         else:
-            molecule = qml.qchem.Molecule(symbols, coords)
+            try:
+                molecule = qml.qchem.Molecule(symbols, coords)
+            except Exception:
+                try:
+                    molecule = qml.qchem.Molecule(symbols, coords, load_data=True)
+                except Exception:
+                    class SimpleMolecule:
+                        def __init__(self, syms, crds, n_e, n_o):
+                            self.symbols = syms
+                            self.coordinates = crds
+                            self.charge = 0
+                            self.n_electrons = n_e
+                            self.n_orbitals = n_o
+                    molecule = SimpleMolecule(symbols, coords, num_electrons, num_qubits // 2)
 
         if use_orbital_prep:
             active_electrons_val = active_electrons_save
@@ -659,8 +679,9 @@ def get_active_space_dipole_operators(symbols, geometry, active_electrons, activ
                 op += FermionOperator(f'{2*u_idx+1}^ {2*v_idx+1}', coeff)
                 
         qubit_op = jordan_wigner(op)
-        pl_op = qml.from_openfermion(qubit_op)
-        dipole_ops.append(pl_op)
+        from openfermion import get_sparse_operator
+        sp_op = get_sparse_operator(qubit_op, n_qubits=int(2*active_orbitals))
+        dipole_ops.append(sp_op)
         
     return dipole_ops
 
@@ -715,10 +736,19 @@ hf = scf.RHF(mol)
 hf.run(verbose=0)
 
 # Build PennyLane Molecule object and match MO coefficients
-if not (USE_ORBITAL_PREP and "I" in symbols):
+try:
     mole = qml.qchem.Molecule(symbols, geometry, basis_name="sto-3g", unit="bohr")
     _, coeffs, _, _, _ = qml.qchem.scf(mole)()
     hf.mo_coeff = coeffs
+except Exception:
+    class SimpleMolecule:
+        def __init__(self, syms, crds, n_e, n_o):
+            self.symbols = syms
+            self.coordinates = crds
+            self.charge = 0
+            self.n_electrons = n_e
+            self.n_orbitals = n_o
+    mole = SimpleMolecule(symbols, geometry, mol.nelectron, mol.nao)
 
 # Setup active space
 n_cas = qchem_data["active_orbitals"]
@@ -757,10 +787,13 @@ if not use_cache_absorption:
     wf_dipole = []
     dipole_norm = []
 
-    # Project initial state using the dipole moment operators
+    # Project initial state using the dipole moment operators (using SciPy CSR sparse matrix to avoid 2^N dense RAM explosion)
     for rho in rhos:
-        dipole_matrix_rho = qml.matrix(m_rho[rho], wire_order=range(2 * n_cas))
-        wf = dipole_matrix_rho.dot(wf_casci)
+        sp_mat = m_rho[rho]
+        wf = sp_mat.dot(wf_casci)
+        if hasattr(wf, "toarray"):
+            wf = wf.toarray().ravel()
+
         if np.allclose(wf, np.zeros_like(wf)):
             wf_dipole.append(wf)
             dipole_norm.append(0.0)
@@ -777,16 +810,20 @@ if not use_cache_absorption:
 # %%
 if not use_cache_absorption:
     if USE_CDF:
-        print("Computing fresh CDF Hamiltonian for absorption active space...")
-        cdf_res = compute_cdf_hamiltonian(
-            molecule=mole,
-            hamiltonian=None,
-            use_orbital_prep=USE_ORBITAL_PREP,
-            active_electrons_val=n_electron_cas,
-            active_orbitals_val=n_cas,
-            molecule_name="H2O",
-            use_bliss=USE_BLISS
-        )
+        if isinstance(qchem_data.get("hamiltonian"), dict) and "core_tensors" in qchem_data["hamiltonian"]:
+            print("Reusing pre-computed CDF Hamiltonian from dataset...")
+            cdf_res = qchem_data["hamiltonian"]
+        else:
+            print("Computing fresh CDF Hamiltonian for absorption active space...")
+            cdf_res = compute_cdf_hamiltonian(
+                molecule=mole,
+                hamiltonian=None,
+                use_orbital_prep=USE_ORBITAL_PREP,
+                active_electrons_val=n_electron_cas,
+                active_orbitals_val=n_cas,
+                molecule_name=target_molecule,
+                use_bliss=USE_BLISS
+            )
 
         core_constant = cdf_res["nuc_constant"]
         cdf_phase_offset = cdf_res.get("cdf_phase_offset", 0.0)
@@ -889,7 +926,9 @@ if not use_cache_absorption:
     # Define compiled step and measurement QNodes to avoid recompiling overhead
     @qml.qnode(dev_prop)
     def trotter_step_circuit(state_in):
-        qml.StatePrep(state_in, wires=dev_prop.wires.tolist())
+        state_clean = np.asarray(state_in, dtype=np.complex128)
+        state_clean = state_clean / np.linalg.norm(state_clean)
+        qml.StatePrep(state_clean, wires=dev_prop.wires.tolist())
         if USE_CDF:
             prior_U = np.eye(n_cas)
             prior_U = first_order_trotter(tau / 2, prior_U=prior_U, 
@@ -902,7 +941,9 @@ if not use_cache_absorption:
 
     @qml.qnode(dev_prop)
     def measurement_circuit(state_in):
-        qml.StatePrep(state_in, wires=dev_prop.wires.tolist())
+        state_clean = np.asarray(state_in, dtype=np.complex128)
+        state_clean = state_clean / np.linalg.norm(state_clean)
+        qml.StatePrep(state_clean, wires=dev_prop.wires.tolist())
         return [qml.expval(op) for op in [qml.PauliX(wires=0), qml.PauliY(wires=0)]]
 
 
@@ -927,11 +968,33 @@ if not use_cache_absorption:
     expvals = np.zeros((2, len(time_interval)))
 
     # Execute time-domain quantum simulation
-    print("\n--- Running Absorption Spectrum Time-Domain Simulation ---")
-    for rho in rhos:
+    active_channels = [r for r in rhos if dipole_norm[r] > 0]
+    total_evals = len(active_channels) * len(time_interval)
+
+    print(f"\n=======================================================")
+    print(f"   TIME-DOMAIN TROTTER SIMULATION COMPLEXITY REPORT   ")
+    print(f"=======================================================")
+    print(f"  Target Molecule         : {target_molecule}")
+    print(f"  Active Space Qubits     : {2 * n_cas} qubits (CAS({n_electron_cas}e, {n_cas}o))")
+    print(f"  Active Dipole Channels  : {len(active_channels)} / {len(rhos)} (x, y, z)")
+    if USE_CDF:
+        print(f"  CDF Leaf Fragments (L)  : {_U.shape[0]}")
+    print(f"  Trotter Steps per Axis  : {len(time_interval)}")
+    print(f"  Total Quantum Circuits  : {total_evals}")
+    print(f"=======================================================\n")
+
+    try:
+        from tqdm.auto import tqdm
+    except ImportError:
+        from tqdm import tqdm
+
+    pbar = tqdm(total=total_evals, desc=f"Trotter Simulation ({target_molecule})", unit="step")
+
+    for rho_idx, rho in enumerate(rhos):
         if dipole_norm[rho] == 0:
             continue
         state = initial_circuit(wf_dipole[rho])
+        axis_name = ["X", "Y", "Z"][rho_idx] if rho_idx < 3 else f"Axis {rho_idx}"
         for i in range(0, len(time_interval)):
             state = trotter_step_circuit(state)
             if USE_ANALYTIC_ABSORPTION:
@@ -940,6 +1003,11 @@ if not use_cache_absorption:
                 shots = shots_list[i]
                 measurement = qml.set_shots(measurement_circuit, shots)(state)
             expvals[:, i] += dipole_norm[rho]**2 * np.array(measurement).real
+
+            pbar.update(1)
+            pbar.set_postfix({"channel": axis_name, "step": f"{i+1}/{len(time_interval)}"})
+
+    pbar.close()
 
 # %% [markdown]
 # ## Step 1.6: Fourier Transform Post-Processing & Classical Validation Plot
@@ -967,33 +1035,41 @@ if not use_cache_absorption:
 
     spectrum = np.array([f_domain_Greens_func(w) for w in wgrid_eval])
 
-    # Compute Classical spectrum reference (FCI / CASCI)
-    print("Solving for classical transition dipole moments...")
-    mycasci.fcisolver.nroots = 250
-    mycasci.run(verbose=0)
-    energies = mycasci.e_tot
-    E_i_val = energies[0]
+    # Compute Classical spectrum reference (FCI / CASCI) only for small validation molecules
+    run_classical_reference = not (USE_ORBITAL_PREP and "I" in symbols) and (mol.nao <= 20)
 
-    # Determine the dipole integrals using atomic orbitals and convert to molecular orbital basis
-    dip_ints_ao = hf.mol.intor("int1e_r_cart", comp=3)
-    mo_coeffs = coeffs[:, n_core : n_core + n_cas]
-    dip_ints_mo = qml.math.einsum("ik,xkl,lj->xij", mo_coeffs.T, dip_ints_ao, mo_coeffs)
+    if run_classical_reference:
+        print("Solving for classical transition dipole moments...")
+        mycasci.fcisolver.nroots = 250
+        mycasci.run(verbose=0)
+        energies = mycasci.e_tot
+        if not isinstance(energies, (list, tuple, np.ndarray)):
+            energies = np.array([energies])
+        E_i_val = energies[0]
 
-    def final_state_overlap(ci_id):
-        t_dm1 = mycasci.fcisolver.trans_rdm1(
-            mycasci.ci[0], mycasci.ci[ci_id], n_cas, n_electron_cas
-        )
-        return qml.math.einsum("xij,ji->x", dip_ints_mo, t_dm1)
+        # Determine the dipole integrals using atomic orbitals and convert to molecular orbital basis
+        dip_ints_ao = hf.mol.intor("int1e_r_cart", comp=3)
+        mo_coeffs = coeffs[:, n_core : n_core + n_cas]
+        dip_ints_mo = qml.math.einsum("ik,xkl,lj->xij", mo_coeffs.T, dip_ints_ao, mo_coeffs)
 
-    # Exclude static ground-state term (index 0)
-    F_m_Is = np.array([final_state_overlap(i) for i in range(1, len(energies))])
-    excitation_energies = energies[1:] - E_i_val
+        def final_state_overlap(ci_id):
+            t_dm1 = mycasci.fcisolver.trans_rdm1(
+                mycasci.ci[0], mycasci.ci[ci_id], n_cas, n_electron_cas
+            )
+            return qml.math.einsum("xij,ji->x", dip_ints_mo, t_dm1)
 
-    spectrum_classical_func = lambda w: (1 / np.pi) * np.sum(
-                    [np.sum(np.abs(F_m_I)**2) * eta / ((w - w_n)**2 + eta**2)
-                        for (F_m_I, w_n) in zip(F_m_Is, excitation_energies)])
+        # Exclude static ground-state term (index 0)
+        F_m_Is = np.array([final_state_overlap(i) for i in range(1, len(energies))])
+        excitation_energies = energies[1:] - E_i_val
 
-    spectrum_classical = np.array([spectrum_classical_func(w) for w in w_rel])
+        spectrum_classical_func = lambda w: (1 / np.pi) * np.sum(
+                        [np.sum(np.abs(F_m_I)**2) * eta / ((w - w_n)**2 + eta**2)
+                            for (F_m_I, w_n) in zip(F_m_Is, excitation_energies)])
+
+        spectrum_classical = np.array([spectrum_classical_func(w) for w in w_rel])
+    else:
+        print(f"Skipping Classical CASCI reference solver for {target_molecule} (beyond classical limit).")
+        spectrum_classical = None
 
     # Save calculated absorption results to cache
     os.makedirs(absorption_cache_dir, exist_ok=True)
@@ -1012,14 +1088,17 @@ if not use_cache_absorption:
 df_abs_dict = {
     "Energy (eV)": wgrid_ev,
     "Quantum (FT)": spectrum,
-    "Classical (Exact)": spectrum_classical,
 }
+if spectrum_classical is not None:
+    df_abs_dict["Classical (Exact)"] = spectrum_classical
+
 df_abs = pd.DataFrame(df_abs_dict)
 
 fig, ax = plt.subplots(figsize=(9, 4.5))
 ax.plot(df_abs["Energy (eV)"], df_abs["Quantum (FT)"], label="Quantum (FT)", color="darkcyan")
-ax.plot(df_abs["Energy (eV)"], df_abs["Classical (Exact)"], "--", label="Classical (Exact)", color="magenta")
-ax.set_title("Simulated Absorption Spectrum for H2O Active Space")
+if spectrum_classical is not None:
+    ax.plot(df_abs["Energy (eV)"], df_abs["Classical (Exact)"], "--", label="Classical (Exact)", color="magenta")
+ax.set_title(f"Simulated Absorption Spectrum for {target_molecule} Active Space")
 ax.set_xlabel("Energy (eV)")
 ax.set_ylabel("Absorption (arb.)")
 ax.legend(loc="upper right")
@@ -1104,12 +1183,17 @@ if use_orbital_prep_val:
     setting_suffix += "_orbitalprep"
 if use_cdf_val:
     setting_suffix += "_cdf"
+use_bliss_val = globals().get("USE_BLISS", None)
+if use_bliss_val == "lp":
+    setting_suffix += "_blisslp"
+elif use_bliss_val == "pl":
+    setting_suffix += "_blisspl"
 
-cache_path = os.path.join(cache_dir, f"qsceom_cache{setting_suffix}.pkl")
+cache_path = os.path.join(cache_dir, f"qsceom_cache_{target_molecule.lower()}{setting_suffix}.pkl")
 has_cache = os.path.exists(cache_path)
 
 seq_len = 4
-trial_name = f"trial_h2o{setting_suffix}"
+trial_name = f"trial_{target_molecule.lower()}{setting_suffix}"
 save_dir = os.path.abspath(os.path.join(current_file_dir, "data", f"seq_len={seq_len}/{trial_name}"))
 
 if not has_cache:
@@ -1672,10 +1756,15 @@ if 'has_cache' not in globals():
         setting_suffix += "_orbitalprep"
     if use_cdf_val:
         setting_suffix += "_cdf"
-    cache_path = os.path.join(cache_dir, f"qsceom_cache{setting_suffix}.pkl")
+    use_bliss_val = globals().get("USE_BLISS", None)
+    if use_bliss_val == "lp":
+        setting_suffix += "_blisslp"
+    elif use_bliss_val == "pl":
+        setting_suffix += "_blisspl"
+    cache_path = os.path.join(cache_dir, f"qsceom_cache_{target_molecule.lower()}{setting_suffix}.pkl")
     has_cache = os.path.exists(cache_path)
     seq_len = 4
-    trial_name = f"trial_h2o{setting_suffix}"
+    trial_name = f"trial_{target_molecule.lower()}{setting_suffix}"
     save_dir = os.path.abspath(os.path.join(current_file_dir, "data", f"seq_len={seq_len}/{trial_name}"))
 
 if not has_cache:
@@ -1846,7 +1935,12 @@ if 'symbols' not in globals():
         setting_suffix += "_orbitalprep"
     if use_cdf_val:
         setting_suffix += "_cdf"
-    cache_path = os.path.join(cache_dir, f"qsceom_cache{setting_suffix}.pkl")
+    use_bliss_val = globals().get("USE_BLISS", None)
+    if use_bliss_val == "lp":
+        setting_suffix += "_blisslp"
+    elif use_bliss_val == "pl":
+        setting_suffix += "_blisspl"
+    cache_path = os.path.join(cache_dir, f"qsceom_cache_{target_molecule.lower()}{setting_suffix}.pkl")
     if os.path.exists(cache_path):
         print(f"Loading variables from cache for Step 2.2: {cache_path}")
         with open(cache_path, "rb") as f:
