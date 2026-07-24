@@ -40,7 +40,7 @@
 # Here is a diagram that illustrates the Benders-QAMOO workflow:
 
 # %% [markdown]
-# ![bq](benders_qamoo.png)
+# ![bq](../../img/benders_qamoo.png)
 
 # %%
 # %matplotlib inline
@@ -91,7 +91,7 @@ from qiskit_aer import AerSimulator
 #   * `[1, 2, 3]`: PEC + SLC + Propagated Noise Absorption (PNA)
 
 # %%
-GRID_CASE = "IEEE-33" # Choose between "IEEE-33", "IEEE-14", "IEEE-39", and "IEEE-118"
+GRID_CASE = "IEEE-14" # Choose between "IEEE-33", "IEEE-14", "IEEE-39", and "IEEE-118"
 HARDWARE_TARGET = "Mac" # Choose between "Mac", "H100", "B200", and "QPU"
 
 if HARDWARE_TARGET == "QPU":
@@ -119,10 +119,10 @@ else:  # "Mac"
     USE_QPU = False
     USE_CUDA = False
 
-USE_NOISE = False
 MAX_THREADS = 0 # Setting to 0 will use all available CPU cores for multi-core parallel local execution
-USE_SAMPLOMATIC = False
-SAMPLOMATIC_METHODS = []
+USE_SAMPLOMATIC = True
+USE_NOISE = True
+SAMPLOMATIC_METHODS = [1,2]
 
 if USE_SAMPLOMATIC and not USE_QPU and not USE_NOISE:
     print("⚠️ WARNING: USE_SAMPLOMATIC is True, but the simulation is NOISELESS (USE_QPU=False, USE_NOISE=False). "
