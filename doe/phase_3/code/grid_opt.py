@@ -30,7 +30,10 @@
 # **Team Name:** Entangled Trio
 #
 # This notebook demonstrates our approach based on Quantum Approximate Multi-Objective Optimization (QAMOO) by [Kotil et al.](https://doi.org/10.1038/s43588-025-00873-y) combined with classical Benders decomposition for strategic siting of energy storage and microgrids. We evaluate this over a Pandapower grid (e.g., IEEE-33 bus) considering 3 objectives inspired by [Multiverse Computing](https://doi.org/10.36227/techrxiv.175502655.52172592/v1):
-# 1. **Resilience / Reliability ($C_{\rm R}$)**
+# 1. **Resilience / Reliability ($C_{\rm R}$)** -- for `GRID_CASE = "IEEE-118"`, this is grounded in
+#    real empirical contingency data (10 years, 2014-2023, 663 events, merged DOE-417/EAGLE-I
+#    disturbance records) rather than a topological proxy; see the "Compute contingency-weighted
+#    resilience" step below and `phase 3/code/dataset_recommendation.md` for sourcing.
 # 2. **Capital Investment ($C_{\rm I}$)**
 # 3. **Voltage-Control Quality ($C_{\rm VC}$)**
 #
@@ -278,7 +281,7 @@ def _run_qamoo_workflow(data_root: str, run_id: str, num_qubits: int, num_object
 #
 # Configure the execution backend, grid case selection, and advanced error mitigation settings for the quantum workflow:
 #
-# * **`GRID_CASE`**: Selector for pandapower network. Toggle between `"IEEE-33"` (33-bus radial distribution system) and `"IEEE-14"` (14-bus transmission system).
+# * **`GRID_CASE`**: Selector for pandapower network. Toggle between `"IEEE-33"` (33-bus radial distribution system), `"IEEE-14"` (14-bus transmission system), and `"IEEE-118"` (118-bus regional-transmission-scale system, per the DOE GIC Phase 3 PDF's recommended "tractable" test systems).
 # * **`USE_QPU`**: If `True`, attempt to use IBM Quantum runtime for QAOA execution. Defaults to `False` (use local `AerSimulator`). Enabling requires IBM account/runtime setup on the machine.
 # * **`USE_SAMPLOMATIC`**: If `True`, apply advanced client-side error mitigation via Qiskit's Samplomatic and the new `Executor` primitive. Requires `USE_QPU = True` and a real QPU backend.
 # * **`SAMPLOMATIC_METHODS`**: List of advanced error mitigation methods to run (requires `USE_QPU = True` and a real QPU backend):
@@ -288,7 +291,7 @@ def _run_qamoo_workflow(data_root: str, run_id: str, num_qubits: int, num_object
 #   * `[1, 2, 3]`: PEC + SLC + Propagated Noise Absorption (PNA)
 
 # %%
-GRID_CASE = "IEEE-33" # Choose between "IEEE-33" and "IEEE-14"
+GRID_CASE = "IEEE-33" # Choose between "IEEE-33", "IEEE-14", "IEEE-39", and "IEEE-118"
 USE_QPU = False
 USE_SAMPLOMATIC = False
 SAMPLOMATIC_METHODS = []
@@ -304,6 +307,8 @@ elif GRID_CASE == "IEEE-14":
     net = nw.case14()
 elif GRID_CASE == "IEEE-39":
     net = nw.case39()
+elif GRID_CASE == "IEEE-118":
+    net = nw.case118()
 else:
     raise ValueError(f"Unknown GRID_CASE: {GRID_CASE}")
 
@@ -366,18 +371,108 @@ r_max = r_n.max()
 if r_max > 0:
     r_n = r_n / r_max
 
-# 3. Compute distance-based reliability dist_n
-print("Computing reliability/distance indices dist_n...")
-dist_n = np.zeros(len(candidate_buses))
-slack_bus_orig = list(slack_buses)[0]
-for idx, bus in enumerate(candidate_buses):
+# 3. Compute contingency-weighted resilience dist_n (REPLACES the topological
+# "distance from slack bus" proxy). Uses real empirical outage-category probabilities
+# from 10 years (2014-2023, 663 events) of merged DOE-417/EAGLE-I data instead of pure
+# graph topology. Variable name kept as `dist_n` so the QuadraticProgram/Benders/QAMOO
+# code below (which references it as the 3rd, "reliability", objective) needs no other
+# changes -- higher dist_n[i] still means "more reliability benefit from siting at bus i",
+# just now grounded in real contingency data rather than hop-count from the slack bus.
+print("Computing contingency-weighted resilience dist_n (real DOE-417/EAGLE-I data)...")
+
+try:
+    _script_dir = os.path.dirname(os.path.abspath(__file__))
+except NameError:
+    _script_dir = os.getcwd()
+_contingency_path = os.path.join(_script_dir, "data", "contingency_scenario_table.csv")
+if not os.path.exists(_contingency_path):
+    raise FileNotFoundError(
+        f"Real contingency data not found at {_contingency_path}. Copy "
+        "contingency_scenario_table.csv from phase 3/code/data/ alongside this script "
+        "(see dataset_recommendation.md for sourcing/citation)."
+    )
+_contingency_df = pd.read_csv(_contingency_path)
+category_probs = dict(zip(_contingency_df["event_category"], _contingency_df["empirical_probability"]))
+print(f"  Loaded {len(category_probs)} contingency categories from real data, "
+      f"sum(prob)={sum(category_probs.values()):.4f}")
+
+# Physics-grounded line -> category mapping (percentile-based so it generalises across
+# GRID_CASE sizes, e.g. 14/33/118-bus, rather than hardcoded thresholds tuned for one
+# network). IEEE test systems carry no real geography, so categories are assigned via
+# computed electrical properties, not invented geographic exposure:
+#   - Weather            : top-20% most heavily loaded lines (most thermally/weather exposed)
+#   - Physical/Security   : lines touching a "hub" bus (top-15% by connectivity degree --
+#                            higher-degree buses are higher-value physical/security targets)
+#   - Equipment/Operational (+ Cyber, Other/Unknown, which share this pool -- their combined
+#     empirical probability is small, ~3%, so a dedicated line pool isn't warranted): remainder
+bus_degree = dict(nx_graph.degree())
+hub_threshold = np.percentile(list(bus_degree.values()), 85)
+hub_buses = {b for b, d in bus_degree.items() if d >= hub_threshold}
+
+loading = net.res_line["loading_percent"].fillna(0.0).values
+weather_threshold = np.percentile(loading, 80)
+line_category = []
+for li_pos, li in enumerate(net.line.index):
+    from_bus, to_bus = net.line.at[li, "from_bus"], net.line.at[li, "to_bus"]
+    if loading[li_pos] >= weather_threshold:
+        line_category.append("Weather")
+    elif from_bus in hub_buses or to_bus in hub_buses:
+        line_category.append("Physical/Security")
+    else:
+        line_category.append("Equipment/Operational")
+line_category = np.array(line_category)
+
+# One representative (highest-loading) line per category, rather than a full per-line N-1
+# sweep across every category -- keeps this tractable to run locally. A full sweep would
+# multiply the V_n probe cost above by len(net.line), which is impractical at PRUNE_TOP_N=30.
+representative_line = {}
+for cat in ["Weather", "Physical/Security", "Equipment/Operational"]:
+    idxs = np.where(line_category == cat)[0]
+    if len(idxs) == 0:
+        continue
+    representative_line[cat] = net.line.index[idxs[np.argmax(loading[idxs])]]
+print(f"  Representative contingency line per category: {representative_line}")
+
+R_n_by_category = {}
+for cat, line_idx in representative_line.items():
+    R = np.zeros(len(candidate_buses))
+    net_n1 = copy.deepcopy(net)
+    net_n1.line.at[line_idx, "in_service"] = False
     try:
-        dist_n[idx] = nx.shortest_path_length(nx_graph, source=slack_bus_orig, target=bus)
-    except:
-        dist_n[idx] = 1.0
+        pp.runpp(net_n1, algorithm="nr", calculate_voltage_angles=True)
+        n1_base_score = violation_score(net_n1)
+        for idx, bus in enumerate(candidate_buses):
+            best_improvement = 0.0
+            for q_sign in [1.0, -1.0]:
+                trial = copy.deepcopy(net_n1)
+                pp.create_sgen(trial, bus=bus, p_mw=0.0, q_mvar=q_sign * DELTA_MVAR)
+                try:
+                    pp.runpp(trial, algorithm="nr", calculate_voltage_angles=True)
+                    improvement = max(0.0, n1_base_score - violation_score(trial))
+                    best_improvement = max(best_improvement, improvement)
+                except Exception:
+                    pass
+            R[idx] = best_improvement
+    except Exception as e:
+        print(f"  WARNING: N-1 probe for line {line_idx} ({cat}) failed to converge: {e}")
+    r_cat_max = R.max()
+    R_n_by_category[cat] = R / r_cat_max if r_cat_max > 0 else R
+
+# Categories without a distinct line pool (Cyber, Other/Unknown -- combined ~3% empirical
+# probability) share the Equipment/Operational probe results. Documented modeling
+# assumption, consistent with phase 3/code/ieee118_dataset.ipynb.
+for cat in category_probs:
+    if cat not in R_n_by_category:
+        R_n_by_category[cat] = R_n_by_category.get("Equipment/Operational", np.zeros(len(candidate_buses)))
+
+dist_n = np.zeros(len(candidate_buses))
+for cat, prob in category_probs.items():
+    dist_n += prob * R_n_by_category[cat]
 dist_max = dist_n.max()
 if dist_max > 0:
     dist_n = dist_n / dist_max
+
+print(f"  Contingency-weighted resilience dist_n range: {dist_n.min():.4f} - {dist_n.max():.4f}")
 
 # 4. Pruning to top-30 candidate buses by voltage sensitivity V_n
 PRUNE_TOP_N = 30
