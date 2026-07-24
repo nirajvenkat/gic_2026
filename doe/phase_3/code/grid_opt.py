@@ -49,6 +49,7 @@
 # %%
 import os
 import sys
+sys.path.append(os.path.abspath('.'))
 sys.path.append(os.path.abspath('..'))
 import json
 import numpy as np
@@ -72,6 +73,61 @@ from qamoo.algorithms.qaoa import *
 from qamoo.utils.data_structures import ProblemGraphBuilder
 
 from qiskit_aer import AerSimulator
+
+# %% [markdown]
+# ## Feature Toggles, Hardware Targets & Error Mitigation Settings
+#
+# Configure the execution backend, grid case selection, hardware target, and error mitigation settings:
+#
+# * **`HARDWARE_TARGET`**: Target execution platform (`"Mac"`, `"H100"`, `"B200"`, `"QPU"`). Automatically sets `USE_QPU`, `USE_CUDA`, candidate bus pruning (`PRUNE_TOP_N`), and MPS bond dimension (`BOND_DIMENSION`).
+# * **`GRID_CASE`**: Selector for pandapower network. Toggle between `"IEEE-33"`, `"IEEE-14"`, `"IEEE-39"`, and `"IEEE-118"`.
+# * **`USE_NOISE`**: If `True` and not running on real QPU (`HARDWARE_TARGET != "QPU"`), attach an IBM Fake Backend noise model to the `AerSimulator` to simulate realistic hardware error rates locally.
+# * **`MAX_THREADS`**: Maximum CPU threads for parallel OpenMP execution in `AerSimulator`. `0` (default) automatically uses **all available CPU cores** on local machines (e.g. Mac Apple Silicon).
+# * **`USE_SAMPLOMATIC`**: If `True`, apply advanced client-side error mitigation via Qiskit's Samplomatic and `Executor` primitive.
+# * **`SAMPLOMATIC_METHODS`**: List of advanced error mitigation methods to run:
+#   * `[]` or `None`: Standard Pauli & Measurement Twirling (baseline)
+#   * `[1]`: Probabilistic Error Cancellation (PEC)
+#   * `[1, 2]`: PEC + Shaded Lightcones (SLC)
+#   * `[1, 2, 3]`: PEC + SLC + Propagated Noise Absorption (PNA)
+
+# %%
+GRID_CASE = "IEEE-33" # Choose between "IEEE-33", "IEEE-14", "IEEE-39", and "IEEE-118"
+HARDWARE_TARGET = "Mac" # Choose between "Mac", "H100", "B200", and "QPU"
+
+if HARDWARE_TARGET == "QPU":
+    # Real IBM Quantum Hardware QPU execution (Heron-class 156-qubit architecture, e.g., ibm_torino)
+    PRUNE_TOP_N = 120  # IBM Heron supports 156 physical qubits, fitting up to 120 candidate buses
+    BOND_DIMENSION = None  # Physical QPU hardware execution (N/A - no classical MPS bond dimension)
+    USE_QPU = True
+    USE_CUDA = False
+elif HARDWARE_TARGET == "H100":
+    # 8x H100 SXM5 (640 GB VRAM): fits ~60 candidate qubits with MPS bond dimension 128
+    PRUNE_TOP_N = 60
+    BOND_DIMENSION = 128
+    USE_QPU = False
+    USE_CUDA = True
+elif HARDWARE_TARGET == "B200":
+    # 8x B200 SXM6 (1,440 GB VRAM on qBraid): fits ~90+ candidate qubits with MPS bond dimension 256
+    PRUNE_TOP_N = 90
+    BOND_DIMENSION = 256
+    USE_QPU = False
+    USE_CUDA = True
+else:  # "Mac"
+    # Local Apple Silicon Mac: reduced active space (30 candidate qubits, bond dim 64) for fast local runs
+    PRUNE_TOP_N = 30
+    BOND_DIMENSION = 64
+    USE_QPU = False
+    USE_CUDA = False
+
+USE_NOISE = False
+MAX_THREADS = 0 # 0 = use all available CPU cores for multi-core parallel local execution
+USE_SAMPLOMATIC = False
+SAMPLOMATIC_METHODS = []
+
+if USE_SAMPLOMATIC and not USE_QPU and not USE_NOISE:
+    print("⚠️ WARNING: USE_SAMPLOMATIC is True, but the simulation is NOISELESS (USE_QPU=False, USE_NOISE=False). "
+          "Samplomatic error mitigation (twirling, PEC, SLC, PNA) requires noise to demonstrate mitigation effects. "
+          "Consider setting USE_NOISE=True or HARDWARE_TARGET='QPU' for realistic error mitigation testing.")
 
 
 def _problem_set_dir(data_root: str, num_qubits: int, num_objectives: int, num_swap_layers: int = 0, problem_id: int = 0):
@@ -187,6 +243,43 @@ def _run_benders_qamoo_preprocessor(num_qubits: int, problem_dir: str, num_objec
     return target_dir
 
 
+def _get_simulator_backend(num_qubits: int = 30, bond_dim: int = None):
+    """
+    Constructs an AerSimulator backend configured with optional cuTensorNet GPU acceleration (device='GPU')
+    or multi-core CPU parallelism (max_parallel_threads=0 uses all available CPU cores), plus optional IBM
+    Fake Backend noise models (USE_NOISE = True).
+    """
+    if bond_dim is None:
+        bond_dim = BOND_DIMENSION if "BOND_DIMENSION" in globals() else 64
+    device_setting = "GPU" if USE_CUDA else "CPU"
+    backend_opts = {
+        "method": "matrix_product_state",
+        "device": device_setting,
+        "matrix_product_state_max_bond_dimension": bond_dim,
+        "max_parallel_threads": MAX_THREADS,
+    }
+
+    if USE_NOISE:
+        try:
+            from qiskit_ibm_runtime.fake_provider import FakeBrisbane
+            fake_backend = FakeBrisbane()
+            print(f"Loading noisy simulator using IBM Fake Backend ({fake_backend.name}) with device='{device_setting}', bond_dim={bond_dim}, max_threads={MAX_THREADS}...")
+            backend = AerSimulator.from_backend(fake_backend, **backend_opts)
+        except Exception as e:
+            print(f"Warning: Could not load IBM Fake Backend ({e}). Falling back to synthetic depolarizing noise model...")
+            from qiskit_aer.noise import NoiseModel, depolarizing_error
+            noise_model = NoiseModel()
+            noise_model.add_all_qubit_quantum_error(depolarizing_error(0.001, 1), ['sx', 'x'])
+            noise_model.add_all_qubit_quantum_error(depolarizing_error(0.01, 2), ['ecr', 'cx'])
+            backend = AerSimulator(noise_model=noise_model, **backend_opts)
+    else:
+        print(f"Loading noiseless MPS AerSimulator with device='{device_setting}', bond_dim={bond_dim}, max_threads={MAX_THREADS}...")
+        backend = AerSimulator(**backend_opts)
+
+    backend.options.use_fractional_gates = False
+    return backend
+
+
 def _train_qaoa_parameters(problem_folder: str, p_layers: int, num_objectives: int):
     import pickle
     import os
@@ -206,8 +299,15 @@ def _train_qaoa_parameters(problem_folder: str, p_layers: int, num_objectives: i
     ising, _ = qubo.to_ising()
 
     ansatz = QAOAAnsatz(ising, reps=p_layers)
+    bond_dim = BOND_DIMENSION if "BOND_DIMENSION" in globals() else 64
+    backend_opts = {
+        "method": "matrix_product_state",
+        "device": "GPU" if USE_CUDA else "CPU",
+        "matrix_product_state_max_bond_dimension": bond_dim,
+        "max_parallel_threads": MAX_THREADS,
+    }
     estimator = AerEstimator(
-        backend_options={"method": "matrix_product_state", "matrix_product_state_max_bond_dimension": 64},
+        backend_options=backend_opts,
         run_options={"shots": 1024},
     )
 
@@ -235,8 +335,7 @@ def _run_qamoo_workflow(data_root: str, run_id: str, num_qubits: int, num_object
         backend = service.least_busy(min_num_qubits=num_qubits, simulator=False, operational=True)
         print(f"Using QPU backend: {backend.name}")
     else:
-        backend = AerSimulator(method='matrix_product_state', matrix_product_state_max_bond_dimension=64, max_parallel_threads=1)
-        backend.options.use_fractional_gates = False
+        backend = _get_simulator_backend(num_qubits=num_qubits)
 
     problem = ProblemSpecification()
     problem.data_folder = data_root
@@ -264,7 +363,10 @@ def _run_qamoo_workflow(data_root: str, run_id: str, num_qubits: int, num_object
     print(f"Transpiling QAOA circuits for {run_id}...")
     transpile_qaoa_circuits_parametrized(config, backend)
 
-    if ((SAMPLOMATIC_METHODS is not None and len(SAMPLOMATIC_METHODS) > 0) or USE_SAMPLOMATIC) and USE_QPU:
+    if (SAMPLOMATIC_METHODS is not None and len(SAMPLOMATIC_METHODS) > 0) or USE_SAMPLOMATIC:
+        if not (USE_QPU or USE_NOISE):
+            print(f"⚠️ WARNING: Samplomatic requested for {run_id}, but execution backend is NOISELESS (USE_QPU=False, USE_NOISE=False). "
+                  "Set USE_NOISE=True or HARDWARE_TARGET='QPU' for realistic error mitigation testing.")
         print(f"Executing sampled circuits for {run_id} using Samplomatic and Executor...")
         execute_qaoa_circuits_samplomatic([config], backend, methods=SAMPLOMATIC_METHODS)
     else:
@@ -273,25 +375,6 @@ def _run_qamoo_workflow(data_root: str, run_id: str, num_qubits: int, num_object
 
     return config
 
-# %% [markdown]
-# ## Feature Toggles, Grid Selection & Error Mitigation Settings
-#
-# Configure the execution backend, grid case selection, and advanced error mitigation settings for the quantum workflow:
-#
-# * **`GRID_CASE`**: Selector for pandapower network. Toggle between `"IEEE-33"` (33-bus radial distribution system) and `"IEEE-14"` (14-bus transmission system).
-# * **`USE_QPU`**: If `True`, attempt to use IBM Quantum runtime for QAOA execution. Defaults to `False` (use local `AerSimulator`). Enabling requires IBM account/runtime setup on the machine.
-# * **`USE_SAMPLOMATIC`**: If `True`, apply advanced client-side error mitigation via Qiskit's Samplomatic and the new `Executor` primitive. Requires `USE_QPU = True` and a real QPU backend.
-# * **`SAMPLOMATIC_METHODS`**: List of advanced error mitigation methods to run (requires `USE_QPU = True` and a real QPU backend):
-#   * `[]` or `None`: Standard Pauli & Measurement Twirling (baseline)
-#   * `[1]`: Probabilistic Error Cancellation (PEC)
-#   * `[1, 2]`: PEC + Shaded Lightcones (SLC)
-#   * `[1, 2, 3]`: PEC + SLC + Propagated Noise Absorption (PNA)
-
-# %%
-GRID_CASE = "IEEE-33" # Choose between "IEEE-33" and "IEEE-14"
-USE_QPU = False
-USE_SAMPLOMATIC = False
-SAMPLOMATIC_METHODS = []
 
 # %% [markdown]
 # ## 1. Grid Loading and Objective Graph Serialization
@@ -379,8 +462,10 @@ dist_max = dist_n.max()
 if dist_max > 0:
     dist_n = dist_n / dist_max
 
-# 4. Pruning to top-30 candidate buses by voltage sensitivity V_n
-PRUNE_TOP_N = 30
+# 4. Pruning candidate buses by voltage sensitivity V_n based on HARDWARE_TARGET
+if "PRUNE_TOP_N" not in globals():
+    PRUNE_TOP_N = 30
+
 if PRUNE_TOP_N is not None and len(candidate_buses) > PRUNE_TOP_N:
     top_idx = np.argsort(V_n)[::-1][:PRUNE_TOP_N]
     top_idx_sort = np.sort(top_idx)
@@ -392,7 +477,8 @@ else:
     pruned_buses = candidate_buses
 
 num_qubits = len(pruned_buses)
-print(f"Decision variables (qubits): {num_qubits} out of candidate buses: {pruned_buses}")
+bond_str = f"bond_dim={BOND_DIMENSION}" if BOND_DIMENSION is not None else "physical QPU hardware (N/A MPS)"
+print(f"Decision variables (qubits): {num_qubits} out of candidate buses: {pruned_buses} (HARDWARE_TARGET={HARDWARE_TARGET}, {bond_str})")
 
 # Target directory for QAMOO problem
 problem_dir = f'./data/problems/{num_qubits}q/problem_set_{num_qubits}q_0s_3o_0/'
@@ -467,7 +553,12 @@ qubo = conv.convert(qp_lin)
 ising, _ = qubo.to_ising()
 
 ansatz = QAOAAnsatz(ising, reps=p_layers)
-estimator = AerEstimator(backend_options={"method": "matrix_product_state", "matrix_product_state_max_bond_dimension": 64}, run_options={"shots": 1024})
+backend_opts = {
+    "method": "matrix_product_state",
+    "device": "GPU" if USE_CUDA else "CPU",
+    "matrix_product_state_max_bond_dimension": 64,
+}
+estimator = AerEstimator(backend_options=backend_opts, run_options={"shots": 1024})
 
 def cost_func(params):
     bound_ansatz = ansatz.assign_parameters(params)
