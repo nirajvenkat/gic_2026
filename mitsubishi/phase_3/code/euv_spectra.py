@@ -86,7 +86,7 @@ USE_CUDA = False
 USE_DIT = False
 USE_ECP_AVAS = False
 USE_CDF = True
-USE_BLISS = "lp"  # Options: "lp" (our LP-BLISS), "pl" (PennyLane symmetry_shift), or None / False
+USE_BLISS = None  # Options: "lp" (our LP-BLISS), "pl" (PennyLane symmetry_shift), or None / False
 ANALYTIC_QUANTUM_ABSORPTION = True
 
 # Hardware-specific active space settings for IMePh / heavy atoms
@@ -110,9 +110,9 @@ if USE_ECP_AVAS:
 if USE_CDF:
     setting_suffix += "_cdf"
 if USE_BLISS == "lp":
-    setting_suffix += "_bliss_lp"
+    setting_suffix += "_blisslp"
 elif USE_BLISS == "pl":
-    setting_suffix += "_bliss_pl"
+    setting_suffix += "_blisspl"
 
 cache_path = os.path.join(cache_dir, f"qsceom_cache{setting_suffix}.pkl")
 has_cache = os.path.exists(cache_path)
