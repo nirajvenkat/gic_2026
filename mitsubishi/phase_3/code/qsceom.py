@@ -1031,6 +1031,20 @@ def qscEOM(
     # This preserves Rayleigh-Ritz variational behavior (with include_identity=True, the
     # ADAPT state is included in the subspace).
     if shots == 0:
+        def _state_chunk(chunk_indices):
+            local_dev = _make_device(device_name, qubits)
+            circuit_state_local = _build_circuit_state(local_dev)
+            out = {}
+            for idx in chunk_indices:
+                out[idx] = np.asarray(
+                    circuit_state_local(
+                        params,
+                        list1[idx],
+                        null_state,
+                        ash_excitation,
+                    ),
+                    dtype=complex,
+                )
         try:
             from tqdm.auto import tqdm
             pbar = tqdm(total=n_states, desc=f"qscEOM Basis States ({active_electrons}e, {active_orbitals}o)", unit="state")
