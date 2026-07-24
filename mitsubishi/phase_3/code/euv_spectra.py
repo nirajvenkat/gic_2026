@@ -205,7 +205,23 @@ def compute_cdf_hamiltonian(molecule, hamiltonian, use_orbital_prep, active_elec
         two_shift = two_chem
 
     # Compressed Double Factorization (CDF)
-    _, two_body_cores, two_body_leaves = qml.qchem.factorize(two_shift, compressed=True)
+    if USE_CUDA:
+        # Force JAX CPU device context on CUDA platforms because JAX Schur decomposition lacks GPU implementation
+        try:
+            import jax
+            cpu_device = jax.devices("cpu")[0]
+            with jax.default_device(cpu_device):
+                _, two_body_cores, two_body_leaves = qml.qchem.factorize(
+                    two_shift, compressed=True
+                )
+        except Exception:
+            _, two_body_cores, two_body_leaves = qml.qchem.factorize(
+                two_shift, compressed=True
+            )
+    else:
+        _, two_body_cores, two_body_leaves = qml.qchem.factorize(
+            two_shift, compressed=True
+        )
 
 
     # One-body correction
