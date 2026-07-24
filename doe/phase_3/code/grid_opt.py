@@ -120,7 +120,7 @@ else:  # "Mac"
     USE_CUDA = False
 
 USE_NOISE = False
-MAX_THREADS = 0 # 0 = use all available CPU cores for multi-core parallel local execution
+MAX_THREADS = 0 # Setting to 0 will use all available CPU cores for multi-core parallel local execution
 USE_SAMPLOMATIC = False
 SAMPLOMATIC_METHODS = []
 
