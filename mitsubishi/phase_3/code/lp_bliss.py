@@ -48,11 +48,9 @@ def lp_symmetry_shift(core, one_electron, two_electron, n_elec):
             S_gradient[0, one_idx] -= 1.0
             
         # 2. c2 shift: -c2 * (N_e^2 - n_elec^2)
-        # Adds +c2 * n_elec^2 to core, -c2 to 1-body diagonal T_ii, -2*c2 to 2-body V_iijj
+        # Adds +c2 * n_elec^2 to core, and -2*c2 to 2-body V_iijj
         S_gradient[1, 0] = float(n_elec ** 2)
         for i in range(N):
-            one_idx = 1 + i * N + i
-            S_gradient[1, one_idx] -= 1.0
             for j in range(N):
                 two_idx = 1 + N*N + i*(N*N*N) + i*(N*N) + j*N + j
                 S_gradient[1, two_idx] -= 2.0
@@ -127,7 +125,7 @@ def lp_symmetry_shift(core, one_electron, two_electron, n_elec):
         two_shift = np.copy(two_electron)
         
         for i in range(N):
-            one_shift[i, i] -= (c1_opt + c2_opt)
+            one_shift[i, i] -= c1_opt
             for j in range(N):
                 two_shift[i, i, j, j] -= 2.0 * c2_opt
                 

@@ -86,6 +86,7 @@ USE_CUDA = False
 USE_DIT = False
 USE_ECP_AVAS = False
 USE_CDF = True
+USE_BLISS = "lp"  # Options: "lp" (our LP-BLISS), "pl" (PennyLane symmetry_shift), or None / False
 ANALYTIC_QUANTUM_ABSORPTION = True
 
 # Hardware-specific active space settings for IMePh / heavy atoms
@@ -108,6 +109,10 @@ if USE_ECP_AVAS:
     setting_suffix += "_ecpavas"
 if USE_CDF:
     setting_suffix += "_cdf"
+if USE_BLISS == "lp":
+    setting_suffix += "_bliss_lp"
+elif USE_BLISS == "pl":
+    setting_suffix += "_bliss_pl"
 
 cache_path = os.path.join(cache_dir, f"qsceom_cache{setting_suffix}.pkl")
 has_cache = os.path.exists(cache_path)
@@ -125,7 +130,7 @@ save_dir = os.path.abspath(os.path.join(current_file_dir, "data", f"seq_len={seq
 #
 # 1. **Chemist Notation & BLISS Conversion**:
 #    * Converts molecular one-body and two-body integrals into chemist notation ($T_{pq}$ and $V_{pqrs}$).
-#    * Applies the **Block-Invariant Symmetry Shift (BLISS)** to shift eigenvalues and minimize the Hamiltonian's one-norm.
+#    * Applies the **Block-Invariant Symmetry Shift (BLISS)** (via LP-BLISS `"lp"`, PennyLane `"pl"`, or `None`) to shift eigenvalues and minimize the Hamiltonian's one-norm.
 # 2. **Compressed Factorization**:
 #    * Decomposes the shifted two-body tensor into low-rank core and leaf tensor fragments using a compressed numerical fitting routine with **L2 regularization** via `optax` and `jax`.
 # 3. **One-Body Correction & Error Metrics**:
@@ -137,9 +142,9 @@ import numpy as np
 import pennylane as qml
 import pubchempy as pcp
 
-def compute_cdf_hamiltonian(molecule, hamiltonian, use_ecp_avas, active_electrons_val, active_orbitals_val, molecule_name, use_bliss=True):
+def compute_cdf_hamiltonian(molecule, hamiltonian, use_ecp_avas, active_electrons_val, active_orbitals_val, molecule_name, use_bliss="lp"):
     """Computes the Compressed Double Factorization (CDF) representation of the Hamiltonian."""
-    print(f"Constructing CDF Hamiltonian for {molecule_name}...")
+    print(f"Constructing CDF Hamiltonian for {molecule_name} (BLISS mode: {use_bliss})...")
     import optax
     import jax
     
@@ -171,10 +176,21 @@ def compute_cdf_hamiltonian(molecule, hamiltonian, use_ecp_avas, active_electron
     two_chem = qml.math.einsum("prsq->pqrs", two_body)
     one_chem = one_body - 0.5 * qml.math.einsum("pqrr->pq", two_body)
 
-    if use_bliss:
-        # Apply Block-Invariant Symmetry Shift (BLISS)
+    if isinstance(use_bliss, str):
+        use_bliss_mode = use_bliss.lower()
+    elif use_bliss is True:
+        use_bliss_mode = "lp"
+    else:
+        use_bliss_mode = None
+
+    if use_bliss_mode == "lp":
+        from lp_bliss import lp_symmetry_shift
+        core_shift, one_shift, two_shift = lp_symmetry_shift(
+            nuc_core, one_chem, two_chem, n_elec=active_electrons_val if active_electrons_val is not None else molecule.n_electrons
+        )
+    elif use_bliss_mode == "pl":
         core_shift, one_shift, two_shift = qml.qchem.symmetry_shift(
-            nuc_core, one_chem, two_chem, n_elec=active_electrons_val
+            nuc_core, one_chem, two_chem, n_elec=active_electrons_val if active_electrons_val is not None else molecule.n_electrons
         )
     else:
         core_shift = [nuc_core]
@@ -256,11 +272,13 @@ def compute_cdf_hamiltonian(molecule, hamiltonian, use_ecp_avas, active_electron
 #    * If `use_cdf=True`, delegates the integral transformation and compressed factorization to `compute_cdf_hamiltonian`.
 
 # %%
-def generate_molecule_data(molecule_name="H2", source="qchem", local_dataset_path=None, use_ecp_avas=None, use_cdf=None):
+def generate_molecule_data(molecule_name="H2", source="qchem", local_dataset_path=None, use_ecp_avas=None, use_cdf=None, use_bliss=None):
     if use_ecp_avas is None:
         use_ecp_avas = globals().get("USE_ECP_AVAS", False)
     if use_cdf is None:
         use_cdf = globals().get("USE_CDF", False)
+    if use_bliss is None:
+        use_bliss = globals().get("USE_BLISS", "lp")
 
     if local_dataset_path is None:
         local_dataset_path = os.path.join(get_current_file_dir(), "data")
@@ -477,7 +495,7 @@ def generate_molecule_data(molecule_name="H2", source="qchem", local_dataset_pat
             active_orbitals_val = molecule.n_orbitals
 
         hamiltonian = compute_cdf_hamiltonian(
-            molecule, hamiltonian if not use_cdf else None, use_ecp_avas, active_electrons_val, active_orbitals_val, molecule_name
+            molecule, hamiltonian if not use_cdf else None, use_ecp_avas, active_electrons_val, active_orbitals_val, molecule_name, use_bliss=use_bliss
         )
     
     molecule_data[molecule_name] = {
@@ -650,7 +668,7 @@ def get_active_space_dipole_operators(symbols, geometry, active_electrons, activ
 absorption_cache_dir = os.path.join(current_file_dir, "data", "absorption")
 absorption_cache_path = os.path.join(
     absorption_cache_dir, 
-    f"absorption_cache{'_cdf' if USE_CDF else '_nocdf'}.pkl"
+    f"absorption_cache{setting_suffix}.pkl"
 )
 use_cache_absorption = os.path.exists(absorption_cache_path)
 
@@ -767,7 +785,7 @@ if not use_cache_absorption:
             active_electrons_val=n_electron_cas,
             active_orbitals_val=n_cas,
             molecule_name="H2O",
-            use_bliss=False
+            use_bliss=USE_BLISS
         )
 
         core_constant = cdf_res["nuc_constant"]
@@ -1014,12 +1032,12 @@ plt.close(fig)
 # # Step 2: Emission Spectroscopy Simulation
 #
 # In this section, we simulate the Auger emission spectrum of $\rm H_2O$ using:
-# 1. Step 2.1: Generative Quantum Eigensolver (GQE) Model Training & Optimization.
-# 2. Step 2.2: Quantum Self-Consistent Equation-of-Motion (q-sc-EOM) Energy Levels.
-# 3. Step 2.3: Minimal Basis Projection of Atomic Integrals.
-# 4. Step 2.4: One-Center Approximation (OCA) & Auger Transition Intensities.
-# 5. Step 2.5: Classical OpenMolcas Input Generation.
-# 6. Step 2.6: Auger Spectrum Broadening and Overlay Plotting.
+# 1. Generative Quantum Eigensolver (GQE) Model Training & Optimization.
+# 2. Quantum Self-Consistent Equation-of-Motion (q-sc-EOM) Energy Levels.
+# 3. Minimal Basis Projection of Atomic Integrals.
+# 4. One-Center Approximation (OCA) & Auger Transition Intensities.
+# 5. Classical OpenMolcas Input Generation.
+# 6. Auger Spectrum Broadening and Overlay Plotting.
 #
 #
 
