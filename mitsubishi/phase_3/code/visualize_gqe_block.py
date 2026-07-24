@@ -8,13 +8,13 @@ current_file_dir = os.path.dirname(os.path.abspath(__file__))
 
 # 1. Configuration parameters
 target_molecule = "H2O"
-USE_ECP_AVAS = True
+USE_ORBITAL_PREP = True
 seq_len = 4
 block_size = 256
 
 setting_suffix = ""
-if USE_ECP_AVAS:
-    setting_suffix += "_ecpavas"
+if USE_ORBITAL_PREP:
+    setting_suffix += "_orbitalprep"
 
 trial_name = f"trial_{target_molecule.lower()}{setting_suffix}"
 save_dir = os.path.join(current_file_dir, "data", f"seq_len={seq_len}", trial_name)

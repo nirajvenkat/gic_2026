@@ -98,7 +98,7 @@ def _build_pyscf_molecular_integrals(
     charge: int,
     active_electrons: int,
     active_orbitals: int,
-    use_ecp_avas: bool = False,
+    use_orbital_prep: bool = False,
 ):
     """Build molecular integrals matching PennyLane's ``method='pyscf'`` path."""
     import numpy as np
@@ -112,7 +112,7 @@ def _build_pyscf_molecular_integrals(
         charge=int(charge),
         active_electrons=int(active_electrons),
         active_orbitals=int(active_orbitals),
-        use_ecp_avas=use_ecp_avas,
+        use_orbital_prep=use_orbital_prep,
     )
     return (
         np.array(core_constant, dtype=float, copy=True),
@@ -206,12 +206,12 @@ def _build_pyscf_molecular_integrals_cached(
     charge: int,
     active_electrons: int,
     active_orbitals: int,
-    use_ecp_avas: bool = False,
+    use_orbital_prep: bool = False,
 ):
     """Cached PySCF integral builder for repeated qscEOM runs on the same molecule."""
     import numpy as np
 
-    if use_ecp_avas and "I" in symbols_key:
+    if use_orbital_prep and "I" in symbols_key:
         core_constant, one_mo, two_mo = _build_pyscf_molecular_integrals_ecp(
             symbols_key=symbols_key,
             geometry_key=geometry_key,
@@ -279,7 +279,7 @@ def _build_exact_fermion_operator(
     charge: int,
     active_electrons: int,
     active_orbitals: int,
-    use_ecp_avas: bool = False,
+    use_orbital_prep: bool = False,
 ):
     """Build the exact molecular Hamiltonian as an OpenFermion FermionOperator."""
     import numpy as np
@@ -297,7 +297,7 @@ def _build_exact_fermion_operator(
         charge=charge,
         active_electrons=active_electrons,
         active_orbitals=active_orbitals,
-        use_ecp_avas=use_ecp_avas,
+        use_orbital_prep=use_orbital_prep,
     )
     one_spin, two_spin = _expand_spatial_integrals_to_spin_orbital(one_mo, two_mo)
     interaction = InteractionOperator(
@@ -317,7 +317,7 @@ def _build_brg_fermion_operator(
     active_electrons: int,
     active_orbitals: int,
     brg_tolerance: float,
-    use_ecp_avas: bool = False,
+    use_orbital_prep: bool = False,
 ):
     """Build a BRG-truncated molecular Hamiltonian as an OpenFermion FermionOperator."""
     import numpy as np
@@ -337,7 +337,7 @@ def _build_brg_fermion_operator(
         charge=charge,
         active_electrons=active_electrons,
         active_orbitals=active_orbitals,
-        use_ecp_avas=use_ecp_avas,
+        use_orbital_prep=use_orbital_prep,
     )
     one_spin, two_spin = _expand_spatial_integrals_to_spin_orbital(one_mo, two_mo)
     eigenvalues, one_body_squares, one_body_correction, truncation_value = low_rank_two_body_decomposition(
@@ -385,7 +385,7 @@ def _build_brg_hamiltonian_dense(
     active_electrons: int,
     active_orbitals: int,
     brg_tolerance: float,
-    use_ecp_avas: bool = False,
+    use_orbital_prep: bool = False,
 ):
     """Build a BRG-truncated dense molecular Hamiltonian matrix."""
     import numpy as np
@@ -402,7 +402,7 @@ def _build_brg_hamiltonian_dense(
         active_electrons=active_electrons,
         active_orbitals=active_orbitals,
         brg_tolerance=brg_tolerance,
-        use_ecp_avas=use_ecp_avas,
+        use_orbital_prep=use_orbital_prep,
     )
     n_spin_orbitals = int(2 * int(active_orbitals))
     dense = np.asarray(get_sparse_operator(fermion_op, n_qubits=n_spin_orbitals).toarray(), dtype=complex)
@@ -711,7 +711,7 @@ def qscEOM(
     projector_backend: str = "auto",
     return_details: bool = False,
     outpath: str = ".",
-    use_ecp_avas: bool = False,
+    use_orbital_prep: bool = False,
 ):
     """Compute qscEOM eigenvalues from an ansatz state.
 
@@ -879,7 +879,7 @@ def qscEOM(
     H = None
     qubits = 2 * int(active_orbitals)
     if shots != 0 or resolved_projector_backend == "dense":
-        if use_ecp_avas and "I" in symbols:
+        if use_orbital_prep and "I" in symbols:
             # Construct H from ECP integrals classically
             from openfermion import InteractionOperator, get_fermion_operator, jordan_wigner
             core_constant, one_mo, two_mo = _build_pyscf_molecular_integrals(
@@ -889,7 +889,7 @@ def qscEOM(
                 charge=charge,
                 active_electrons=active_electrons,
                 active_orbitals=active_orbitals,
-                use_ecp_avas=True,
+                use_orbital_prep=True,
             )
             one_spin, two_spin = _expand_spatial_integrals_to_spin_orbital(one_mo, two_mo)
             interaction = InteractionOperator(

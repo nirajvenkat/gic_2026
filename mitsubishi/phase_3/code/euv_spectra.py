@@ -74,9 +74,9 @@ current_file_dir = get_current_file_dir()
 #
 # * **`USE_CUDA`**: If `True`, enable cuQuantum using PennyLane device "lightning.gpu" and enable CUDA kernels in PyTorch through the "cuda" device.
 # * **`USE_DIT`**: If `True`, enable Diffusion Transformer (DIT) for GQE training as an alternative to the auto-regressive GPTnano.
-# * **`USE_ECP_AVAS`**: If `True`, apply Effective Core Potentials (ECP) with active space selection (AVAS) for heavy atoms (like Iodine) to reduce the molecular active space size.
+# * **`USE_ORBITAL_PREP`**: If `True`, apply pre-quantum classical orbital and integral preprocessing (ECP, AVAS, CVS) for heavy atoms to reduce/separate the molecular space before qubit mapping.
 # * **`USE_CDF`**: Enable Compressed Double Factorization (CDF) to calculate low-rank Hamiltonian approximations for both absorption and emission paths.
-# * **`ANALYTIC_QUANTUM_ABSORPTION`**: If `True`, use exact (analytic) statevector expectation values for the Hadamard-test measurements in the absorption simulation, removing shot noise. Set to `False` to simulate finite-shot sampling with an exponentially-decaying kernel allocation.
+# * **`USE_ANALYTIC_ABSORPTION`**: If `True`, use exact (analytic) statevector expectation values for the Hadamard-test measurements in the absorption simulation, removing shot noise. Set to `False` to simulate finite-shot sampling with an exponentially-decaying kernel allocation.
 
 
 # %%
@@ -84,14 +84,14 @@ target_molecule = "H2O"
 
 USE_CUDA = False
 USE_DIT = False
-USE_ECP_AVAS = False
+USE_ORBITAL_PREP = False
 USE_CDF = True
 USE_BLISS = None  # Options: "lp" (our LP-BLISS), "pl" (PennyLane symmetry_shift), or None / False
-ANALYTIC_QUANTUM_ABSORPTION = True
+USE_ANALYTIC_ABSORPTION = True
 
 # Hardware-specific active space settings for IMePh / heavy atoms
 if target_molecule in ["IMePh", "4-iodo-2-methylphenol"]:
-    GPU_TARGET = "Mac"  # "B200" (36 qubits/18 orbitals), "H100" (32 qubits/16 orbitals), or "Mac" (30 qubits/15 orbitals)
+    GPU_TARGET = "Mac"  # "B200" (36 qubits/18 orbitals), "H100" (32 qubits/16 orbitals), or "Mac" (20 qubits/10 orbitals)
     IODINE_BASIS = "def2-SVP"  # "def2-SVP" (small-core ECP keeping 4d explicit) or "lanl2dz" (large-core ECP freezing 4d)
     IODINE_ECP = "def2-SVP"
     
@@ -105,8 +105,8 @@ else:
 
 cache_dir = os.path.join(current_file_dir, "data", "qsceom")
 setting_suffix = ""
-if USE_ECP_AVAS:
-    setting_suffix += "_ecpavas"
+if USE_ORBITAL_PREP:
+    setting_suffix += "_orbitalprep"
 if USE_CDF:
     setting_suffix += "_cdf"
 if USE_BLISS == "lp":
@@ -142,13 +142,13 @@ import numpy as np
 import pennylane as qml
 import pubchempy as pcp
 
-def compute_cdf_hamiltonian(molecule, hamiltonian, use_ecp_avas, active_electrons_val, active_orbitals_val, molecule_name, use_bliss="lp"):
+def compute_cdf_hamiltonian(molecule, hamiltonian, use_orbital_prep, active_electrons_val, active_orbitals_val, molecule_name, use_bliss="lp"):
     """Computes the Compressed Double Factorization (CDF) representation of the Hamiltonian."""
     print(f"Constructing CDF Hamiltonian for {molecule_name} (BLISS mode: {use_bliss})...")
     import optax
     import jax
     
-    if use_ecp_avas and "I" in molecule.symbols:
+    if use_orbital_prep and "I" in molecule.symbols:
         from qsceom import _build_pyscf_molecular_integrals
         nuc_core, one_body, two_mo_of = _build_pyscf_molecular_integrals(
             symbols=molecule.symbols,
@@ -157,7 +157,7 @@ def compute_cdf_hamiltonian(molecule, hamiltonian, use_ecp_avas, active_electron
             charge=molecule.charge,
             active_electrons=active_electrons_val,
             active_orbitals=active_orbitals_val,
-            use_ecp_avas=True,
+            use_orbital_prep=True,
         )
         V_active = two_mo_of.transpose(0, 3, 1, 2)
         two_body = V_active.transpose(0, 3, 2, 1)
@@ -272,9 +272,9 @@ def compute_cdf_hamiltonian(molecule, hamiltonian, use_ecp_avas, active_electron
 #    * If `use_cdf=True`, delegates the integral transformation and compressed factorization to `compute_cdf_hamiltonian`.
 
 # %%
-def generate_molecule_data(molecule_name="H2", source="qchem", local_dataset_path=None, use_ecp_avas=None, use_cdf=None, use_bliss=None):
-    if use_ecp_avas is None:
-        use_ecp_avas = globals().get("USE_ECP_AVAS", False)
+def generate_molecule_data(molecule_name="H2", source="qchem", local_dataset_path=None, use_orbital_prep=None, use_cdf=None, use_bliss=None):
+    if use_orbital_prep is None:
+        use_orbital_prep = globals().get("USE_ORBITAL_PREP", False)
     if use_cdf is None:
         use_cdf = globals().get("USE_CDF", False)
     if use_bliss is None:
@@ -290,7 +290,7 @@ def generate_molecule_data(molecule_name="H2", source="qchem", local_dataset_pat
     
     if source == "pubchem":
         import pickle
-        cache_suffix = "_ecpavas" if use_ecp_avas else ""
+        cache_suffix = "_orbitalprep" if use_orbital_prep else ""
         if use_cdf:
             cache_suffix += "_cdf"
         cache_file = os.path.join(local_dataset_path, f"{molecule_name}_pubchem{cache_suffix}.pkl")
@@ -364,15 +364,15 @@ def generate_molecule_data(molecule_name="H2", source="qchem", local_dataset_pat
                             getattr(atom, 'y', 0.0) or 0.0, 
                             getattr(atom, 'z', 0.0) or 0.0] for atom in c.atoms])
         
-    if use_ecp_avas and "I" in symbols:
+    if use_orbital_prep and "I" in symbols:
         if GPU_TARGET == "H100":
             # 8x H100 SXM5 (640 GB VRAM): fits 32 qubits
             active_orbitals = 16
             active_electrons = 16
         elif GPU_TARGET == "Mac":
-            # Local Apple Silicon Mac (20 GB VRAM): fits 30 qubits
-            active_orbitals = 15
-            active_electrons = 12
+            # Local Apple Silicon Mac: reduced active space for fast local runs (20 qubits / 10 orbitals / 8 electrons)
+            active_orbitals = 10
+            active_electrons = 8
         else:
             # Default to 8x B200 SXM6 (1,440 GB VRAM): fits 36 qubits
             active_orbitals = 18
@@ -427,7 +427,7 @@ def generate_molecule_data(molecule_name="H2", source="qchem", local_dataset_pat
             charge=0,
             active_electrons=active_electrons,
             active_orbitals=active_orbitals,
-            use_ecp_avas=True,
+            use_orbital_prep=True,
         )
         if not use_cdf:
             one_spin, two_spin = _expand_spatial_integrals_to_spin_orbital(one_mo, two_mo)
@@ -487,7 +487,7 @@ def generate_molecule_data(molecule_name="H2", source="qchem", local_dataset_pat
         else:
             molecule = qml.qchem.Molecule(symbols, coords)
 
-        if use_ecp_avas:
+        if use_orbital_prep:
             active_electrons_val = active_electrons_save
             active_orbitals_val = active_orbitals_save
         else:
@@ -495,7 +495,7 @@ def generate_molecule_data(molecule_name="H2", source="qchem", local_dataset_pat
             active_orbitals_val = molecule.n_orbitals
 
         hamiltonian = compute_cdf_hamiltonian(
-            molecule, hamiltonian if not use_cdf else None, use_ecp_avas, active_electrons_val, active_orbitals_val, molecule_name, use_bliss=use_bliss
+            molecule, hamiltonian if not use_cdf else None, use_orbital_prep, active_electrons_val, active_orbitals_val, molecule_name, use_bliss=use_bliss
         )
     
     molecule_data[molecule_name] = {
@@ -513,7 +513,7 @@ def generate_molecule_data(molecule_name="H2", source="qchem", local_dataset_pat
     if source == "pubchem":
         try:
             import pickle
-            cache_suffix = "_ecpavas" if use_ecp_avas else ""
+            cache_suffix = "_orbitalprep" if use_orbital_prep else ""
             cache_file = os.path.join(local_dataset_path, f"{molecule_name}_pubchem{cache_suffix}.pkl")
             os.makedirs(os.path.dirname(cache_file), exist_ok=True)
             print(f"Caching computed {molecule_name} (pubchem) to: {cache_file}")
@@ -606,7 +606,7 @@ import pickle
 # Ensure JAX uses float64 for factorization alignment
 config.update("jax_enable_x64", True)
 
-def get_active_space_dipole_operators(symbols, geometry, active_electrons, active_orbitals, use_ecp_avas=False, mo_coeff=None):
+def get_active_space_dipole_operators(symbols, geometry, active_electrons, active_orbitals, use_orbital_prep=False, mo_coeff=None):
     import numpy as np
     import pennylane as qml
     from pyscf import gto, scf
@@ -614,7 +614,7 @@ def get_active_space_dipole_operators(symbols, geometry, active_electrons, activ
     
     mol = gto.Mole()
     mol.atom = list(zip(symbols, geometry))
-    if use_ecp_avas and "I" in symbols:
+    if use_orbital_prep and "I" in symbols:
         basis_map = {}
         ecp_map = {}
         for s in symbols:
@@ -690,7 +690,7 @@ symbols = qchem_data["symbols"]
 geometry = qchem_data["geometry"]
 
 # Build PySCF Mole object and run SCF
-if USE_ECP_AVAS and "I" in symbols:
+if USE_ORBITAL_PREP and "I" in symbols:
     mol = gto.Mole()
     mol.atom = list(zip(symbols, geometry))
     basis_map = {}
@@ -715,7 +715,7 @@ hf = scf.RHF(mol)
 hf.run(verbose=0)
 
 # Build PennyLane Molecule object and match MO coefficients
-if not (USE_ECP_AVAS and "I" in symbols):
+if not (USE_ORBITAL_PREP and "I" in symbols):
     mole = qml.qchem.Molecule(symbols, geometry, basis_name="sto-3g", unit="bohr")
     _, coeffs, _, _, _ = qml.qchem.scf(mole)()
     hf.mo_coeff = coeffs
@@ -750,7 +750,7 @@ if not use_cache_absorption:
 if not use_cache_absorption:
     # Dipole moment operator in molecular orbital basis
     m_rho = get_active_space_dipole_operators(
-        symbols, geometry, n_electron_cas, n_cas, use_ecp_avas=USE_ECP_AVAS, mo_coeff=hf.mo_coeff
+        symbols, geometry, n_electron_cas, n_cas, use_orbital_prep=USE_ORBITAL_PREP, mo_coeff=hf.mo_coeff
     )
     rhos = range(len(m_rho))
 
@@ -781,7 +781,7 @@ if not use_cache_absorption:
         cdf_res = compute_cdf_hamiltonian(
             molecule=mole,
             hamiltonian=None,
-            use_ecp_avas=USE_ECP_AVAS,
+            use_orbital_prep=USE_ORBITAL_PREP,
             active_electrons_val=n_electron_cas,
             active_orbitals_val=n_cas,
             molecule_name="H2O",
@@ -934,7 +934,7 @@ if not use_cache_absorption:
         state = initial_circuit(wf_dipole[rho])
         for i in range(0, len(time_interval)):
             state = trotter_step_circuit(state)
-            if ANALYTIC_QUANTUM_ABSORPTION:
+            if USE_ANALYTIC_ABSORPTION:
                 measurement = measurement_circuit(state)
             else:
                 shots = shots_list[i]
@@ -1097,11 +1097,11 @@ import pickle
 current_file_dir = get_current_file_dir()
 
 cache_dir = os.path.join(current_file_dir, "data", "qsceom")
-use_ecp_avas_val = globals().get("USE_ECP_AVAS", False)
+use_orbital_prep_val = globals().get("USE_ORBITAL_PREP", False)
 use_cdf_val = globals().get("USE_CDF", False)
 setting_suffix = ""
-if use_ecp_avas_val:
-    setting_suffix += "_ecpavas"
+if use_orbital_prep_val:
+    setting_suffix += "_orbitalprep"
 if use_cdf_val:
     setting_suffix += "_cdf"
 
@@ -1665,11 +1665,11 @@ if 'has_cache' not in globals():
     import os
     current_file_dir = get_current_file_dir()
     cache_dir = os.path.join(current_file_dir, "data", "qsceom")
-    use_ecp_avas_val = globals().get("USE_ECP_AVAS", False)
+    use_orbital_prep_val = globals().get("USE_ORBITAL_PREP", False)
     use_cdf_val = globals().get("USE_CDF", False)
     setting_suffix = ""
-    if use_ecp_avas_val:
-        setting_suffix += "_ecpavas"
+    if use_orbital_prep_val:
+        setting_suffix += "_orbitalprep"
     if use_cdf_val:
         setting_suffix += "_cdf"
     cache_path = os.path.join(cache_dir, f"qsceom_cache{setting_suffix}.pkl")
@@ -1752,7 +1752,7 @@ if not has_cache:
         shots=0, 
         return_details=True,
         outpath=datasets_pyscf_dir,
-        use_ecp_avas=USE_ECP_AVAS,
+        use_orbital_prep=USE_ORBITAL_PREP,
     )
     eigs_ip, details_ip = qsceom_ip_res
     print("\nq-sc-EOM IP (N-1) state energies:")
@@ -1774,7 +1774,7 @@ if not has_cache:
         shots=0, 
         return_details=True,
         outpath=datasets_pyscf_dir,
-        use_ecp_avas=USE_ECP_AVAS,
+        use_orbital_prep=USE_ORBITAL_PREP,
     )
     eigs_dip, details_dip = qsceom_dip_res
     print("\nq-sc-EOM DIP (N-2) state energies:")
@@ -1796,7 +1796,7 @@ if not has_cache:
         "params": params,
         "ash_excitation": ash_excitation,
         "USE_DIT": USE_DIT if 'USE_DIT' in globals() else False,
-        "USE_ECP_AVAS": USE_ECP_AVAS if 'USE_ECP_AVAS' in globals() else False,
+        "USE_ORBITAL_PREP": USE_ORBITAL_PREP if 'USE_ORBITAL_PREP' in globals() else False,
         "grd_E": grd_E if 'grd_E' in globals() else None,
     }
     with open(cache_path, "wb") as f:
@@ -1839,11 +1839,11 @@ import os
 if 'symbols' not in globals():
     current_file_dir = get_current_file_dir()
     cache_dir = os.path.join(current_file_dir, "data", "qsceom")
-    use_ecp_avas_val = globals().get("USE_ECP_AVAS", False)
+    use_orbital_prep_val = globals().get("USE_ORBITAL_PREP", False)
     use_cdf_val = globals().get("USE_CDF", False)
     setting_suffix = ""
-    if use_ecp_avas_val:
-        setting_suffix += "_ecpavas"
+    if use_orbital_prep_val:
+        setting_suffix += "_orbitalprep"
     if use_cdf_val:
         setting_suffix += "_cdf"
     cache_path = os.path.join(cache_dir, f"qsceom_cache{setting_suffix}.pkl")
@@ -1875,7 +1875,7 @@ print("(Paper Eq. 19: D = T^{-1} U C, where T=MBS overlap, U=MBS-CGTO overlap, C
 # 1. Reconstruct molecule and compute RHF
 mol_str = "; ".join([f"{s} {g[0]} {g[1]} {g[2]}" for s, g in zip(symbols, geometry)])
 
-if USE_ECP_AVAS and "I" in symbols:
+if USE_ORBITAL_PREP and "I" in symbols:
     mol = gto.Mole()
     mol.atom = mol_str
     mol.unit = "Bohr"
