@@ -393,9 +393,17 @@ def generate_molecule_data(molecule_name="H2", source="qchem", local_dataset_pat
         
     if use_orbital_prep and "I" in symbols:
         if GPU_TARGET == "H100":
-            # 8x H100 SXM5 (640 GB VRAM): fits 32 qubits
-            active_orbitals = 16
-            active_electrons = 16
+            import torch
+            # Check if running on single GPU node vs 8x GPU cluster
+            if torch.cuda.is_available() and torch.cuda.device_count() <= 1:
+                # Single H100 / H200 GPU instance (141 GB VRAM / 180 GB RAM):
+                # 30 active-space qubits + 1 ancilla = 31 qubits (requires ~34 GB VRAM / 17 GB RAM)
+                active_orbitals = 15
+                active_electrons = 16
+            else:
+                # 8x H100 GPU cluster (640 GB VRAM): 32 active-space qubits + 1 ancilla = 33 qubits
+                active_orbitals = 16
+                active_electrons = 16
         elif GPU_TARGET == "Mac":
             # Local Apple Silicon Mac: reduced active space for fast local runs (20 qubits / 10 orbitals / 8 electrons)
             active_orbitals = 10
@@ -816,8 +824,7 @@ if not use_cache_absorption:
             strs_col = addrs2str(n_cas, n_electron_cas // 2, col)
             wf_dict = dict(zip(list(zip(strs_row, strs_col)), dat / norm_val))
             wf_dict = _sign_chem_to_phys(wf_dict, n_cas)
-            wf = _wfdict_to_statevector(wf_dict, n_cas)
-            wf_dipole.append(wf)
+            wf_dipole.append(wf_dict)
 
 # %% [markdown]
 # ## Step 1.3: Compressed Double Factorization (CDF) of the Hamiltonian
@@ -1010,7 +1017,11 @@ if not use_cache_absorption:
     for rho_idx, rho in enumerate(rhos):
         if dipole_norm[rho] == 0:
             continue
-        state = initial_circuit(wf_dipole[rho])
+        import gc
+        wf_channel = _wfdict_to_statevector(wf_dipole[rho], n_cas) if isinstance(wf_dipole[rho], dict) else wf_dipole[rho]
+        state = initial_circuit(wf_channel)
+        del wf_channel
+        gc.collect()
         axis_name = ["X", "Y", "Z"][rho_idx] if rho_idx < 3 else f"Axis {rho_idx}"
         for i in range(0, len(time_interval)):
             state = trotter_step_circuit(state)
