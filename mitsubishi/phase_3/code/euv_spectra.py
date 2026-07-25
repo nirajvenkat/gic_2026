@@ -1670,23 +1670,10 @@ if not has_cache:
                     gen_token_seq, pred_Es = gpt.generate(**gen_kwargs)
                 pred_Es = pred_Es.cpu().numpy()
 
-                # Offload PyTorch model to CPU & clear CUDA cache to hand 100% of VRAM to PennyLane
-                if device == "cuda":
-                    torch.cuda.synchronize()
-                    gpt.cpu()
-                    torch.cuda.empty_cache()
-                    torch.cuda.synchronize()
-
                 gen_inds = (gen_token_seq[:, 1:] - 1).cpu().numpy()
                 gen_op_seq = op_pool[gen_inds]
                 true_Es = get_final_energies(gen_op_seq)
 
-                # Move PyTorch model back to GPU for training
-                if device == "cuda":
-                    torch.cuda.synchronize()
-                    gpt.to(device)
-                    torch.cuda.empty_cache()
-                    torch.cuda.synchronize()
                 gpt.train()
 
                 mae = np.mean(np.abs(pred_Es - true_Es))
