@@ -1215,6 +1215,22 @@ def get_subsequence_energies(op_seq):
 print(get_subsequence_energies([[op_pool[0], op_pool[1]]]))
 
 # %% [markdown]
+# ## GQE Training & Dataset Hyperparameters
+#
+# Configure parameters controlling dataset generation size, training iterations, evaluation frequency, and sampling sizes:
+#
+# * **`GQE_TRAIN_SIZE`**: Number of operator sequences generated in the training set (default: `1024`).
+# * **`GQE_NUM_ITERS`**: Total training iterations/epochs for GQE model optimization (default: `10000`).
+# * **`GQE_EVAL_FREQ`**: Iteration interval for computing evaluation loss and logging generated sequence performance (default: `500`).
+# * **`GQE_SAMPLE_EVAL_SIZE`**: Number of sequences sampled during model evaluation and random baseline comparisons (default: `128`).
+
+# %%
+GQE_TRAIN_SIZE = 128
+GQE_NUM_ITERS = 10000
+GQE_EVAL_FREQ = 2500
+GQE_SAMPLE_EVAL_SIZE = 128
+
+# %% [markdown]
 # ## Dataset Generation
 #
 # Generate the training set consisting of random operator index sequences, their corresponding token sequences (pre-padded with starting/special tokens), and evaluate their subsequence energies.
@@ -1265,7 +1281,7 @@ if not has_cache:
         train_size = len(train_op_seq)
     else:
         # Generate sequence of indices of operators in vocab
-        train_size = 1024
+        train_size = globals().get("GQE_TRAIN_SIZE", 128)
         os.makedirs(save_dir, exist_ok=True)
 
         train_op_pool_inds = np.random.randint(op_pool_size, size=(train_size, seq_len))
@@ -1605,7 +1621,9 @@ if not has_cache:
         gpt = torch.load(load_path, map_location=device, weights_only=False)
     else:
         gpt.train()
-        for i in tqdm(range(10000), desc="Training"):
+        num_iters = globals().get("GQE_NUM_ITERS", 10000)
+        eval_freq = globals().get("GQE_EVAL_FREQ", 2500)
+        for i in tqdm(range(num_iters), desc="Training"):
             # Shuffle batches of the training set
             np.random.shuffle(train_inds)
             token_batches = torch.tensor_split(tokens[train_inds], n_batches)
@@ -1621,7 +1639,7 @@ if not has_cache:
                 loss_record += loss.item() / n_batches
             losses.append(loss_record)
 
-            if (i+1) % 500 == 0:
+            if (i+1) % eval_freq == 0:
                 # For GPT evaluation
                 gpt.eval()
                 gen_kwargs = {
@@ -1730,7 +1748,7 @@ try:
             df_preds_stats.hvplot.line(x="Training Iterations", y="Ave Pred E", alpha=0.5, linewidth=1) * 
             df_preds_stats.hvplot.area(x="Training Iterations", y="Min Pred E", y2="Max Pred E", alpha=0.1)
         )
-        fig = fig * hv.Curve([[0, grd_E], [10000, grd_E]], label="Ground State Energy").opts(color="k", alpha=0.4, linestyle="dashed")
+        fig = fig * hv.Curve([[0, grd_E], [globals().get("GQE_NUM_ITERS", 10000), grd_E]], label="Ground State Energy").opts(color="k", alpha=0.4, linestyle="dashed")
         fig = fig.opts(ylabel="Sequence Energies", title="GQE Evaluations", fig_size=600, fontscale=2)
         from IPython.display import display
         display(fig)
@@ -1763,7 +1781,7 @@ if df_compare_Es is None:
 
         if 'train_sub_seq_en' not in globals():
             # Regenerate a small random sample to compute the "Random" baseline
-            train_size_sample = 128
+            train_size_sample = globals().get("GQE_SAMPLE_EVAL_SIZE", 128)
             sample_op_pool_inds = np.random.randint(op_pool_size, size=(train_size_sample, seq_len))
             sample_op_seq = op_pool[sample_op_pool_inds]
             train_sub_seq_en_val = get_subsequence_energies(sample_op_seq)
@@ -1774,8 +1792,9 @@ if df_compare_Es is None:
             gpt = torch.load(model_path, map_location=device, weights_only=False)
 
         # Latest model
+        sample_eval_size = globals().get("GQE_SAMPLE_EVAL_SIZE", 128)
         gen_kwargs = {
-            "n_sequences": 128, 
+            "n_sequences": sample_eval_size, 
             "max_new_tokens": seq_len, 
             "temperature": 0.001, 
             "device": device
