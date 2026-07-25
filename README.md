@@ -19,6 +19,7 @@ qbraid envs install etrio_fjqdnq
 After installation you get an environment name `ENV_NAME`, activate it:
 ```
 qbraid envs activate <ENV_NAME>
+cd gic_2026/
 ```
 Convert scripts to Jupyter notebooks using:
 ```

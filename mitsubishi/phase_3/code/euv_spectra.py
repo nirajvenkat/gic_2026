@@ -1218,7 +1218,12 @@ trial_name = f"trial_{target_molecule.lower()}{setting_suffix}"
 save_dir = os.path.abspath(os.path.join(current_file_dir, "data", f"seq_len={seq_len}/{trial_name}"))
 
 if not has_cache:
-    dataset_cache_file = os.path.join(save_dir, "gqe_dataset.pkl")
+    model_type_suffix = "dit" if globals().get("USE_DIT", False) else "gpt"
+    dataset_cache_file = os.path.join(save_dir, f"gqe_dataset_{model_type_suffix}.pkl")
+    legacy_dataset_cache_file = os.path.join(save_dir, "gqe_dataset.pkl")
+    if not os.path.exists(dataset_cache_file) and os.path.exists(legacy_dataset_cache_file):
+        dataset_cache_file = legacy_dataset_cache_file
+
     if os.path.exists(dataset_cache_file):
         print(f"Loading GQE training dataset from cache: {dataset_cache_file}")
         with open(dataset_cache_file, "rb") as f:
@@ -1559,10 +1564,15 @@ if not has_cache:
     current_mae = 10000
 
     # Check if a pre-trained model is already available
-    model_path = os.path.join(save_dir, "gqe.pt")
-    if os.path.exists(model_path):
-        print(f"Pre-trained GQE model found at {model_path}. Loading model and skipping training loop...")
-        gpt = torch.load(model_path, map_location=device, weights_only=False)
+    model_type_suffix = "dit" if USE_DIT else "gpt"
+    model_filename = f"gqe_{model_type_suffix}.pt"
+    model_path = os.path.join(save_dir, model_filename)
+    legacy_model_path = os.path.join(save_dir, "gqe.pt")
+    load_path = model_path if os.path.exists(model_path) else (legacy_model_path if os.path.exists(legacy_model_path) else model_path)
+
+    if os.path.exists(load_path):
+        print(f"Pre-trained GQE model found at {load_path}. Loading model and skipping training loop...")
+        gpt = torch.load(load_path, map_location=device, weights_only=False)
     else:
         gpt.train()
         for i in tqdm(range(10000), desc="Training"):
@@ -1613,8 +1623,8 @@ if not has_cache:
                 
                 if mae < current_mae:
                     current_mae = mae
-                    torch.save(gpt, f"{save_dir}/gqe.pt")
-                    tqdm.write("Saved model!")
+                    torch.save(gpt, model_path)
+                    tqdm.write(f"Saved model to {model_path}!")
                     
                 gpt.train()
                 
@@ -1622,9 +1632,9 @@ if not has_cache:
         true_Es_t = np.concatenate(true_Es_t, axis=1)
 
         # Persist training outputs for later analysis cells
-        pd.DataFrame(losses).to_csv(f"{save_dir}/losses.csv")
-        pd.DataFrame(true_Es_t, columns=eval_iterations).to_csv(f"{save_dir}/true_Es_t.csv")
-        pd.DataFrame(pred_Es_t, columns=eval_iterations).to_csv(f"{save_dir}/pred_Es_t.csv")
+        pd.DataFrame(losses).to_csv(f"{save_dir}/losses_{model_type_suffix}.csv")
+        pd.DataFrame(true_Es_t, columns=eval_iterations).to_csv(f"{save_dir}/true_Es_t_{model_type_suffix}.csv")
+        pd.DataFrame(pred_Es_t, columns=eval_iterations).to_csv(f"{save_dir}/pred_Es_t_{model_type_suffix}.csv")
 
 # %% [markdown]
 # ## Training Performance Visualization
@@ -1639,7 +1649,10 @@ import pandas as pd
 hvplot.extension('matplotlib')
 
 try:
-    losses_path = f"{save_dir}/losses.csv"
+    model_type_suffix = "dit" if USE_DIT else "gpt"
+    losses_path = f"{save_dir}/losses_{model_type_suffix}.csv"
+    if not os.path.exists(losses_path) and os.path.exists(f"{save_dir}/losses.csv"):
+        losses_path = f"{save_dir}/losses.csv"
     if os.path.exists(losses_path):
         losses = pd.read_csv(losses_path)["0"]
         loss_fig = losses.hvplot(
@@ -1657,8 +1670,14 @@ except Exception as e:
 
 # %%
 try:
-    true_path = f"{save_dir}/true_Es_t.csv"
-    pred_path = f"{save_dir}/pred_Es_t.csv"
+    model_type_suffix = "dit" if USE_DIT else "gpt"
+    true_path = f"{save_dir}/true_Es_t_{model_type_suffix}.csv"
+    pred_path = f"{save_dir}/pred_Es_t_{model_type_suffix}.csv"
+    if not os.path.exists(true_path) and os.path.exists(f"{save_dir}/true_Es_t.csv"):
+        true_path = f"{save_dir}/true_Es_t.csv"
+    if not os.path.exists(pred_path) and os.path.exists(f"{save_dir}/pred_Es_t.csv"):
+        pred_path = f"{save_dir}/pred_Es_t.csv"
+
     if os.path.exists(true_path) and os.path.exists(pred_path):
         df_true = pd.read_csv(true_path).iloc[:, 1:]
         df_pred = pd.read_csv(pred_path).iloc[:, 1:]
@@ -1695,7 +1714,11 @@ except Exception as e:
 
 # %%
 df_compare_Es = None
-csv_path = f"{save_dir}/compare_Es.csv"
+model_type_suffix = "dit" if USE_DIT else "gpt"
+csv_path = f"{save_dir}/compare_Es_{model_type_suffix}.csv"
+if not os.path.exists(csv_path) and os.path.exists(f"{save_dir}/compare_Es.csv"):
+    csv_path = f"{save_dir}/compare_Es.csv"
+
 if os.path.exists(csv_path):
     try:
         df_compare_Es = pd.read_csv(csv_path)
@@ -1704,6 +1727,10 @@ if os.path.exists(csv_path):
 
 if df_compare_Es is None:
     try:
+        model_path = os.path.join(save_dir, f"gqe_{model_type_suffix}.pt")
+        if not os.path.exists(model_path) and os.path.exists(f"{save_dir}/gqe.pt"):
+            model_path = f"{save_dir}/gqe.pt"
+
         if 'train_sub_seq_en' not in globals():
             # Regenerate a small random sample to compute the "Random" baseline
             train_size_sample = 128
@@ -1714,7 +1741,7 @@ if df_compare_Es is None:
             train_sub_seq_en_val = train_sub_seq_en
 
         if 'gpt' not in globals() or gpt is None:
-            gpt = torch.load(f"{save_dir}/gqe.pt", map_location=device, weights_only=False)
+            gpt = torch.load(model_path, map_location=device, weights_only=False)
 
         # Latest model
         gen_kwargs = {
@@ -1732,7 +1759,7 @@ if df_compare_Es is None:
         true_Es_ = get_subsequence_energies(gen_op_seq_)[:, -1].reshape(-1, 1)
 
         # Best model
-        loaded = torch.load(f"{save_dir}/gqe.pt", map_location=device, weights_only=False)
+        loaded = torch.load(model_path, map_location=device, weights_only=False)
         loaded_token_seq_, _ = loaded.generate(**gen_kwargs)
         loaded_inds_ = (loaded_token_seq_[:, 1:] - 1).cpu().numpy()
         loaded_op_seq_ = op_pool[loaded_inds_]
@@ -1794,7 +1821,11 @@ if not has_cache:
     # Ensure loaded_true_Es_ and loaded_op_seq_ are defined in memory (even if summary table was loaded from cache)
     if 'loaded_true_Es_' not in globals() or 'loaded_op_seq_' not in globals():
         print("Re-evaluating GQE models to extract best ansatz sequence...")
-        loaded = torch.load(f"{save_dir}/gqe.pt", map_location=device, weights_only=False)
+        model_type_suffix = "dit" if globals().get("USE_DIT", False) else "gpt"
+        model_path = os.path.join(save_dir, f"gqe_{model_type_suffix}.pt")
+        if not os.path.exists(model_path) and os.path.exists(f"{save_dir}/gqe.pt"):
+            model_path = f"{save_dir}/gqe.pt"
+        loaded = torch.load(model_path, map_location=device, weights_only=False)
         gen_kwargs = {
             "n_sequences": 128, 
             "max_new_tokens": seq_len, 

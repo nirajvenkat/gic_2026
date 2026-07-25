@@ -847,8 +847,8 @@ def qscEOM(
         raise ValueError("brg_tolerance requires method='pyscf'")
     if projector_backend == "sparse_number_preserving" and shots != 0:
         raise ValueError("projector_backend='sparse_number_preserving' requires shots=0")
-    if projector_backend == "sparse_number_preserving" and method_normalized != "pyscf":
-        raise ValueError("projector_backend='sparse_number_preserving' requires method='pyscf'")
+    if projector_backend == "sparse_number_preserving" and method_normalized not in {"pyscf", "openfermion"}:
+        raise ValueError("projector_backend='sparse_number_preserving' requires method='pyscf' or method='openfermion'")
 
     try:
         if len(params) != len(ash_excitation):
@@ -866,7 +866,7 @@ def qscEOM(
         ) from exc
 
     if projector_backend == "auto":
-        if shots == 0 and method_normalized == "pyscf":
+        if shots == 0 and method_normalized in {"pyscf", "openfermion"}:
             try:
                 import openfermion  # noqa: F401
             except ImportError:
@@ -1138,6 +1138,7 @@ def qscEOM(
                     active_electrons=active_electrons,
                     active_orbitals=active_orbitals,
                     brg_tolerance=float(brg_tolerance),
+                    use_orbital_prep=use_orbital_prep,
                 )
                 brg_details.update(sparse_brg_details)
             else:
@@ -1148,6 +1149,7 @@ def qscEOM(
                     charge=charge,
                     active_electrons=active_electrons,
                     active_orbitals=active_orbitals,
+                    use_orbital_prep=use_orbital_prep,
                 )
 
             sparse_hamiltonian, sparse_details = _build_number_preserving_sparse_hamiltonian(
