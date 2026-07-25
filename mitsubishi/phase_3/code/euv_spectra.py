@@ -1828,11 +1828,6 @@ if df_compare_Es is None:
 
         with torch.no_grad():
             gen_token_seq_, _ = gpt.generate(**gen_kwargs)
-        if device == "cuda":
-            torch.cuda.synchronize()
-            gpt.cpu()
-            torch.cuda.empty_cache()
-            torch.cuda.synchronize()
 
         gen_inds_ = (gen_token_seq_[:, 1:] - 1).cpu().numpy()
         gen_op_seq_ = op_pool[gen_inds_]
@@ -1846,11 +1841,6 @@ if df_compare_Es is None:
         loaded = torch.load(model_path, map_location=device, weights_only=False)
         with torch.no_grad():
             loaded_token_seq_, _ = loaded.generate(**gen_kwargs)
-        if device == "cuda":
-            torch.cuda.synchronize()
-            loaded.cpu()
-            torch.cuda.empty_cache()
-            torch.cuda.synchronize()
 
         loaded_inds_ = (loaded_token_seq_[:, 1:] - 1).cpu().numpy()
         loaded_op_seq_ = op_pool[loaded_inds_]
