@@ -94,6 +94,10 @@ import torch
 if HARDWARE_TARGET in ["H100", "B200"]:
     USE_CUDA = torch.cuda.is_available()
     GPU_TARGET = HARDWARE_TARGET
+    print("CUDA Available:", torch.cuda.is_available())
+    print("Device Count:", torch.cuda.device_count())
+    if torch.cuda.is_available():
+        print("Device Name:", torch.cuda.get_device_name(0))
 else:
     USE_CUDA = False
     GPU_TARGET = "Mac"
