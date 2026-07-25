@@ -1674,8 +1674,6 @@ if not has_cache:
                 gen_op_seq = op_pool[gen_inds]
                 true_Es = get_final_energies(gen_op_seq)
 
-                gpt.train()
-
                 mae = np.mean(np.abs(pred_Es - true_Es))
                 ave_E = np.mean(true_Es)
                 
