@@ -1215,16 +1215,18 @@ def get_subsequence_energies(op_seq):
 # Verify with a tiny sequence
 # print(get_subsequence_energies([[op_pool[0], op_pool[1]]]))
 
-@qml.qnode(dev)
+dev_eval = qml.device("lightning.qubit", wires=num_qubits)
+
+@qml.qnode(dev_eval)
 def final_energy_circuit(gqe_ops):
-    """Executes a sequence of GQE operators and measures final ground state energy directly (single pass, no snapshots)."""
+    """Executes a sequence of GQE operators and measures final ground state energy directly on CPU (single pass, no GPU VRAM lock)."""
     qml.BasisState(init_state, wires=range(num_qubits))
     for op in gqe_ops:
         qml.apply(op)
     return qml.expval(meas_hamiltonian)
 
 def get_final_energies(gen_op_seq):
-    """Evaluates final state energy for a batch of operator sequences in a single pass."""
+    """Evaluates final state energy for a batch of operator sequences in a single pass on CPU."""
     energies = [float(final_energy_circuit(ops)) for ops in gen_op_seq]
     return np.array(energies).reshape(-1, 1)
 
@@ -1668,10 +1670,12 @@ if not has_cache:
                     gen_token_seq, pred_Es = gpt.generate(**gen_kwargs)
                 pred_Es = pred_Es.cpu().numpy()
 
-                # Offload PyTorch model to CPU & clear CUDA cache to hand 100% of VRAM to PennyLane cuQuantum
+                # Offload PyTorch model to CPU & clear CUDA cache to hand 100% of VRAM to PennyLane
                 if device == "cuda":
+                    torch.cuda.synchronize()
                     gpt.cpu()
                     torch.cuda.empty_cache()
+                    torch.cuda.synchronize()
 
                 gen_inds = (gen_token_seq[:, 1:] - 1).cpu().numpy()
                 gen_op_seq = op_pool[gen_inds]
@@ -1679,8 +1683,10 @@ if not has_cache:
 
                 # Move PyTorch model back to GPU for training
                 if device == "cuda":
+                    torch.cuda.synchronize()
                     gpt.to(device)
                     torch.cuda.empty_cache()
+                    torch.cuda.synchronize()
                 gpt.train()
 
                 mae = np.mean(np.abs(pred_Es - true_Es))
@@ -1830,8 +1836,10 @@ if df_compare_Es is None:
         with torch.no_grad():
             gen_token_seq_, _ = gpt.generate(**gen_kwargs)
         if device == "cuda":
+            torch.cuda.synchronize()
             gpt.cpu()
             torch.cuda.empty_cache()
+            torch.cuda.synchronize()
 
         gen_inds_ = (gen_token_seq_[:, 1:] - 1).cpu().numpy()
         gen_op_seq_ = op_pool[gen_inds_]
@@ -1842,8 +1850,10 @@ if df_compare_Es is None:
         with torch.no_grad():
             loaded_token_seq_, _ = loaded.generate(**gen_kwargs)
         if device == "cuda":
+            torch.cuda.synchronize()
             loaded.cpu()
             torch.cuda.empty_cache()
+            torch.cuda.synchronize()
 
         loaded_inds_ = (loaded_token_seq_[:, 1:] - 1).cpu().numpy()
         loaded_op_seq_ = op_pool[loaded_inds_]
