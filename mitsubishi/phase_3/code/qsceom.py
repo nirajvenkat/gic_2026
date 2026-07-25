@@ -1047,6 +1047,9 @@ def qscEOM(
                     ),
                     dtype=complex,
                 )
+            return out
+
+        state_map = {}
         try:
             from tqdm.auto import tqdm
             pbar = tqdm(total=n_states, desc=f"qscEOM Basis States ({active_electrons}e, {active_orbitals}o)", unit="state")
