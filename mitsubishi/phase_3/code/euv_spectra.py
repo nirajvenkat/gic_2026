@@ -1220,12 +1220,18 @@ def final_energy_circuit(gqe_ops):
     return qml.expval(meas_hamiltonian)
 
 def get_final_energies(gen_op_seq):
-    """Evaluates final state energy for a batch of operator sequences in a single pass."""
-    energies = [float(final_energy_circuit(ops)) for ops in gen_op_seq]
+    """Evaluates final state energy for a batch of operator sequences on GPU."""
+    energies = [
+        float(final_energy_circuit(ops)) 
+        for ops in tqdm(gen_op_seq, desc="GPU Sequence Evaluation", leave=False, ascii=True)
+    ]
     return np.array(energies).reshape(-1, 1)
 
 # Test the tiny sequence using the fast single-pass function
-print("Testing tiny sequence:", get_final_energies([[op_pool[0], op_pool[1]]]))
+if USE_CUDA:
+    print("Testing tiny sequence:", get_final_energies([[op_pool[0], op_pool[1]]]))
+else:
+    print("Testing tiny sequence:", get_subsequence_energies([[op_pool[0], op_pool[1]]]))
 
 
 # %% [markdown]
