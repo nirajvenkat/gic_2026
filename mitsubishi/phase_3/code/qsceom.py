@@ -954,6 +954,16 @@ def qscEOM(
         kwargs.pop("shots", None)
         if shots > 0:
             kwargs["shots"] = shots
+        if name is None:
+            use_cuda_flag = globals().get("USE_CUDA", False)
+            if not use_cuda_flag:
+                try:
+                    import torch
+                    use_cuda_flag = torch.cuda.is_available()
+                except Exception:
+                    use_cuda_flag = False
+            if use_cuda_flag:
+                name = "lightning.gpu"
         if name is not None:
             if name == "lightning.gpu" and "c_dtype" not in kwargs:
                 kwargs["c_dtype"] = np.complex64

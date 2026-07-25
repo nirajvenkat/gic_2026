@@ -1962,6 +1962,8 @@ if not has_cache:
     os.makedirs(datasets_pyscf_dir, exist_ok=True)
 
     # 4. Run qscEOM to compute the energies (IP and DIP spaces)
+    device_name_qsceom = "lightning.gpu" if USE_CUDA else "lightning.qubit"
+
     # Run 1: IP space (Core-hole state, N-1 electrons)
     qsceom_ip_res = qscEOM(
         symbols=symbols,
@@ -1976,6 +1978,7 @@ if not has_cache:
         basis="sto-3g",
         method="openfermion", # Needed to support open shell
         shots=0, 
+        device_name=device_name_qsceom,
         return_details=True,
         outpath=datasets_pyscf_dir,
         use_orbital_prep=USE_ORBITAL_PREP,
@@ -1998,6 +2001,7 @@ if not has_cache:
         basis="sto-3g",
         method="openfermion", # Consistency
         shots=0, 
+        device_name=device_name_qsceom,
         return_details=True,
         outpath=datasets_pyscf_dir,
         use_orbital_prep=USE_ORBITAL_PREP,
