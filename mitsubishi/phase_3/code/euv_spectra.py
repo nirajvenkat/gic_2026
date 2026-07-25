@@ -83,7 +83,7 @@ current_file_dir = get_current_file_dir()
 # %%
 target_molecule = "IMePh"
 
-HARDWARE_TARGET = "Mac"
+HARDWARE_TARGET = "H100"
 USE_DIT = False
 USE_ORBITAL_PREP = True
 USE_CDF = True
@@ -211,7 +211,11 @@ def compute_cdf_hamiltonian(molecule, hamiltonian, use_orbital_prep, active_elec
         two_shift = two_chem
 
     # Compressed Double Factorization (CDF)
-    if USE_CUDA:
+    two_body_cores = None
+    two_body_leaves = None
+    use_cuda_flag = globals().get("USE_CUDA", False)
+
+    if use_cuda_flag:
         # Force JAX CPU device context on CUDA platforms because JAX Schur decomposition lacks GPU implementation
         try:
             import jax
@@ -221,9 +225,13 @@ def compute_cdf_hamiltonian(molecule, hamiltonian, use_orbital_prep, active_elec
                     two_shift, compressed=True
                 )
         except Exception:
-            _, two_body_cores, two_body_leaves = qml.qchem.factorize(
-                two_shift, compressed=True
-            )
+            pass
+
+    if two_body_cores is None:
+        _, two_body_cores, two_body_leaves = qml.qchem.factorize(
+            two_shift, compressed=True
+        )
+
     # Optional truncation of two-body CDF fragments to speed up gate evolution (0 or None = unrestricted)
     max_fragments = globals().get("MAX_CDF_FRAGMENTS", None)
     if max_fragments and isinstance(max_fragments, int) and max_fragments > 0 and two_body_cores.shape[0] > max_fragments:
