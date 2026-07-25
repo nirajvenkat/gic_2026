@@ -123,9 +123,10 @@ else:  # "Mac"
     USE_CUDA = False
 
 MAX_THREADS = 0 # Setting to 0 will use all available CPU cores for multi-core parallel local execution
-USE_SAMPLOMATIC = True
-USE_NOISE = True
-SAMPLOMATIC_METHODS = [1,2]
+USE_SAMPLOMATIC = False
+USE_NOISE = False
+SAMPLOMATIC_METHODS = []
+FORCE_RERUN = False  # Set to False to quickly load pre-computed results in ./data/ and ./data_benders/ without re-running simulation
 
 if USE_SAMPLOMATIC and not USE_QPU and not USE_NOISE:
     print("⚠️ WARNING: USE_SAMPLOMATIC is True, but the simulation is NOISELESS (USE_QPU=False, USE_NOISE=False). "
@@ -331,6 +332,31 @@ def _train_qaoa_parameters(problem_folder: str, p_layers: int, num_objectives: i
 
 
 def _run_qamoo_workflow(data_root: str, run_id: str, num_qubits: int, num_objectives: int, num_samples: int, p_layers: int):
+    problem = ProblemSpecification()
+    problem.data_folder = data_root
+    problem.num_qubits = num_qubits
+    problem.num_objectives = num_objectives
+    problem.num_swap_layers = 0
+    problem.problem_id = 0
+
+    config = QAOAConfig()
+    config.p = p_layers
+    config.num_samples = num_samples
+    config.shots = 4096
+    config.objective_weights_id = 0
+    config.backend_name = "AerSimulator" if not USE_QPU else "QPU"
+    config.initial_layout = None
+    config.run_id = run_id
+    config.rep_delay = 0.0001
+    config.problem = problem
+
+    # Fast Visualization Mode: reuse existing pre-computed results if present
+    res_folder = config.results_folder
+    force = FORCE_RERUN if 'FORCE_RERUN' in globals() else False
+    if not force and os.path.exists(os.path.join(res_folder, 'non_dominated_positions.npy')) and os.path.exists(os.path.join(res_folder, 'samples.npy')):
+        print(f"Fast Visualization Mode: Loading pre-computed results from {res_folder} (skipping simulation)...")
+        return config
+
     if USE_QPU:
         from qiskit_ibm_runtime import QiskitRuntimeService
         print("Connecting to IBM Quantum runtime...")
@@ -339,13 +365,6 @@ def _run_qamoo_workflow(data_root: str, run_id: str, num_qubits: int, num_object
         print(f"Using QPU backend: {backend.name}")
     else:
         backend = _get_simulator_backend(num_qubits=num_qubits)
-
-    problem = ProblemSpecification()
-    problem.data_folder = data_root
-    problem.num_qubits = num_qubits
-    problem.num_objectives = num_objectives
-    problem.num_swap_layers = 0
-    problem.problem_id = 0
 
     _train_qaoa_parameters(problem.problem_folder, p_layers, num_objectives)
 
@@ -390,20 +409,51 @@ elif GRID_CASE == "IEEE-14":
     net = nw.case14()
 elif GRID_CASE == "IEEE-39":
     net = nw.case39()
+elif GRID_CASE == "IEEE-118":
+    net = nw.case118()
 else:
     raise ValueError(f"Unknown GRID_CASE: {GRID_CASE}")
 
 num_buses = len(net.bus)
 print(f"Loaded {GRID_CASE} grid with {num_buses} buses.")
 
+# Locate dataset folder
+try:
+    _script_dir = os.path.dirname(os.path.abspath(__file__))
+except NameError:
+    _script_dir = os.getcwd()
+_data_dir = os.path.join(_script_dir, "data")
+
+# Inject AI/Data-Center Load Shock from TVA dataset (Phase 3 Spec Step 4)
+_ai_load_path = os.path.join(_data_dir, "tva_ai_load_overlay_2025.csv")
+if not os.path.exists(_ai_load_path):
+    try:
+        from prep_ai_load_overlay import process_ai_load_overlay
+        process_ai_load_overlay()
+    except Exception as e:
+        print(f"  WARNING: Could not auto-generate AI load overlay: {e}")
+
+if os.path.exists(_ai_load_path):
+    overlay_df = pd.read_csv(_ai_load_path)
+    high_growth = overlay_df[overlay_df["growth_scenario"] == "high"]
+    dc_added_total_mw = float(high_growth["dc_load_added_mw"].mean())
+    
+    # Proportional injection of added AI demand across load buses
+    total_existing_mw = net.load["p_mw"].sum()
+    if total_existing_mw > 0:
+        net.load["p_mw"] += (net.load["p_mw"] / total_existing_mw) * dc_added_total_mw
+        print(f"  Injected AI load shock (+{dc_added_total_mw:.2f} MW total) across {len(net.load)} load buses.")
+else:
+    print(f"  WARNING: AI load overlay not found at {_ai_load_path}. Using base grid loads.")
+
 # Extract topology to NetworkX
 mg = top.create_nxgraph(net)
 nx_graph = nx.Graph(mg)
 
-# Since the bus indices are already contiguous 0..num_buses-1, we do not need to relabel them.
+# Since bus indices are contiguous 0..num_buses-1, no relabeling needed
 edges = sorted([tuple(sorted(e)) for e in nx_graph.edges()])
 
-# Extract candidate buses (excluding slack bus, which is typically attached to ext_grid)
+# Candidate buses (excluding slack bus)
 slack_buses = set(net.ext_grid.bus.values) if "ext_grid" in net and len(net.ext_grid) > 0 else {0}
 candidate_buses = [b for b in net.bus.index.tolist() if b not in slack_buses]
 
@@ -413,7 +463,7 @@ def violation_score(network):
     vm = network.res_bus["vm_pu"]
     return float(np.sum((vm - 1.0) ** 2))
 
-# Run base power flow to populate net.res_bus before computing base_score
+# Base power flow
 pp.runpp(net, algorithm="nr", calculate_voltage_angles=True)
 base_score = violation_score(net)
 DELTA_MVAR = 5.0
@@ -433,7 +483,6 @@ for idx, bus in enumerate(candidate_buses):
             pass
     V_n[idx] = best_improvement
 
-# Normalise
 v_max = V_n.max()
 if v_max > 0:
     V_n = V_n / v_max
@@ -452,18 +501,85 @@ r_max = r_n.max()
 if r_max > 0:
     r_n = r_n / r_max
 
-# 3. Compute distance-based reliability dist_n
-print("Computing reliability/distance indices dist_n...")
-dist_n = np.zeros(len(candidate_buses))
-slack_bus_orig = list(slack_buses)[0]
-for idx, bus in enumerate(candidate_buses):
+# 3. Contingency-weighted resilience metric dist_n (10-yr EAGLE-I x DOE-417 empirical probabilities)
+print("Computing contingency-weighted resilience dist_n (real DOE-417/EAGLE-I data)...")
+
+_contingency_path = os.path.join(_data_dir, "contingency_scenario_table.csv")
+if not os.path.exists(_contingency_path):
     try:
-        dist_n[idx] = nx.shortest_path_length(nx_graph, source=slack_bus_orig, target=bus)
-    except:
-        dist_n[idx] = 1.0
+        from prep_outage_scenarios import process_contingency_scenarios
+        process_contingency_scenarios()
+    except Exception as e:
+        print(f"  WARNING: Could not auto-generate contingency scenario table: {e}")
+
+_contingency_df = pd.read_csv(_contingency_path)
+category_probs = dict(zip(_contingency_df["event_category"], _contingency_df["empirical_probability"]))
+print(f"  Loaded {len(category_probs)} contingency categories from real data, sum(prob)={sum(category_probs.values()):.4f}")
+
+# Categorize lines by thermal loading and hub-bus degree percentiles
+bus_degree = dict(nx_graph.degree())
+hub_threshold = np.percentile(list(bus_degree.values()), 85)
+hub_buses = {b for b, d in bus_degree.items() if d >= hub_threshold}
+
+loading = net.res_line["loading_percent"].fillna(0.0).values
+weather_threshold = np.percentile(loading, 80)
+line_category = []
+for li_pos, li in enumerate(net.line.index):
+    from_bus, to_bus = net.line.at[li, "from_bus"], net.line.at[li, "to_bus"]
+    if loading[li_pos] >= weather_threshold:
+        line_category.append("Weather")
+    elif from_bus in hub_buses or to_bus in hub_buses:
+        line_category.append("Physical/Security")
+    else:
+        line_category.append("Equipment/Operational")
+line_category = np.array(line_category)
+
+# One representative (highest-loading) line per category for tractable N-1 contingency probing
+representative_line = {}
+for cat in ["Weather", "Physical/Security", "Equipment/Operational"]:
+    idxs = np.where(line_category == cat)[0]
+    if len(idxs) == 0:
+        continue
+    representative_line[cat] = net.line.index[idxs[np.argmax(loading[idxs])]]
+print(f"  Representative contingency line per category: {representative_line}")
+
+R_n_by_category = {}
+for cat, line_idx in representative_line.items():
+    R = np.zeros(len(candidate_buses))
+    net_n1 = copy.deepcopy(net)
+    net_n1.line.at[line_idx, "in_service"] = False
+    try:
+        pp.runpp(net_n1, algorithm="nr", calculate_voltage_angles=True)
+        n1_base_score = violation_score(net_n1)
+        for idx, bus in enumerate(candidate_buses):
+            best_improvement = 0.0
+            for q_sign in [1.0, -1.0]:
+                trial = copy.deepcopy(net_n1)
+                pp.create_sgen(trial, bus=bus, p_mw=0.0, q_mvar=q_sign * DELTA_MVAR)
+                try:
+                    pp.runpp(trial, algorithm="nr", calculate_voltage_angles=True)
+                    improvement = max(0.0, n1_base_score - violation_score(trial))
+                    best_improvement = max(best_improvement, improvement)
+                except Exception:
+                    pass
+            R[idx] = best_improvement
+    except Exception as e:
+        print(f"  WARNING: N-1 probe for line {line_idx} ({cat}) failed to converge: {e}")
+    r_cat_max = R.max()
+    R_n_by_category[cat] = R / r_cat_max if r_cat_max > 0 else R
+
+for cat in category_probs:
+    if cat not in R_n_by_category:
+        R_n_by_category[cat] = R_n_by_category.get("Equipment/Operational", np.zeros(len(candidate_buses)))
+
+dist_n = np.zeros(len(candidate_buses))
+for cat, prob in category_probs.items():
+    dist_n += prob * R_n_by_category[cat]
 dist_max = dist_n.max()
 if dist_max > 0:
     dist_n = dist_n / dist_max
+
+print(f"  Contingency-weighted resilience dist_n range: {dist_n.min():.4f} - {dist_n.max():.4f}")
 
 # 4. Pruning candidate buses by voltage sensitivity V_n based on HARDWARE_TARGET
 if "PRUNE_TOP_N" not in globals():
@@ -844,8 +960,8 @@ from IPython.display import display
 import numpy as np
 
 # Visualization options
-INTERACTIVE_PLOT = False  # Set to False to render a static, HTML-exportable plot of the best compromise solution
-USE_BENDERS = False       # Set to True to render Benders-QAMOO Pareto front, False for native QAMOO
+INTERACTIVE_PLOT = True  # Set to False to render a static, HTML-exportable plot of the best compromise solution
+USE_BENDERS = True       # Set to True to render Benders-QAMOO Pareto front, False for native QAMOO
 
 try:
     # Determine which results to load
@@ -899,6 +1015,50 @@ try:
                     nc_y.append(y)
                     nc_text.append(f"Bus {bus}")
 
+            # Overlay 1: TVA AI Load Shock Injection
+            ai_x, ai_y, ai_text = [], [], []
+            tot_p = net.load["p_mw"].sum() if "net" in globals() else 1.0
+            dc_mw = dc_added_total_mw if "dc_added_total_mw" in globals() else 383.40
+            for _, row in net.load.iterrows():
+                b = int(row["bus"])
+                if b < num_buses:
+                    bx, by = pos_dict[b]
+                    p_base = float(row["p_mw"])
+                    p_ai = (p_base / tot_p * dc_mw) if tot_p > 0 else 0.0
+                    ai_x.append(bx)
+                    ai_y.append(by)
+                    ai_text.append(f"Bus {b}: Base {p_base:.1f} MW | +AI Shock {p_ai:.1f} MW")
+
+            ai_trace = go.Scatter(
+                x=ai_x, y=ai_y, mode="markers",
+                name="Overlay: TVA AI Load Shock (+383 MW)",
+                marker=dict(symbol="star", size=18, color="#9B59B6", line=dict(width=1, color="#8E44AD")),
+                hoverinfo="text", hovertext=ai_text,
+                visible="legendonly"
+            )
+
+            # Overlay 2: N-1 Contingency / Outage Risk
+            outage_data_traces = []
+            if "representative_line" in globals() and representative_line:
+                cat_colors = {"Weather": "#E74C3C", "Physical/Security": "#E67E22", "Equipment/Operational": "#F1C40F"}
+                for cat, l_idx in representative_line.items():
+                    if l_idx in net.line.index:
+                        fb, tb = net.line.at[l_idx, "from_bus"], net.line.at[l_idx, "to_bus"]
+                        if fb in pos_dict and tb in pos_dict:
+                            x0, y0 = pos_dict[fb]
+                            x1, y1 = pos_dict[tb]
+                            prob = category_probs.get(cat, 0.0) if "category_probs" in globals() else 0.0
+                            outage_data_traces.append(go.Scatter(
+                                x=[x0, x1, None], y=[y0, y1, None],
+                                mode="lines+markers",
+                                name=f"Overlay N-1 Risk: {cat} ({prob:.1%})",
+                                line=dict(color=cat_colors.get(cat, "#E74C3C"), width=4, dash="dash"),
+                                marker=dict(size=10, color=cat_colors.get(cat, "#E74C3C")),
+                                hoverinfo="text",
+                                hovertext=f"N-1 Outage Line {l_idx} ({cat}, Buses {fb}-{tb})",
+                                visible="legendonly"
+                            ))
+
             title_text = (
                 f'Siting Plan ({method_name} - Solution {sol_idx+1}/{len(nd_positions)})<br>'
                 f'Voltage Dev: {obj_vals[0]:.4f} | Cost: {obj_vals[1]:.4f} | Reliability: {obj_vals[2]:.4f}'
@@ -906,10 +1066,12 @@ try:
 
             fig = go.Figure(
                 data=[
-                    go.Scatter(x=edge_x, y=edge_y, line=dict(width=1.5, color='#888'), hoverinfo='none', mode='lines', name='Edges'),
+                    go.Scatter(x=edge_x, y=edge_y, line=dict(width=1.5, color='#888'), hoverinfo='none', mode='lines', name='Grid Lines'),
                     go.Scatter(x=placed_x, y=placed_y, mode='markers+text', text=placed_text, textposition="top center", name='Microgrid/Storage Placed (1)', marker=dict(color='#FF6B6B', size=24)),
                     go.Scatter(x=standard_x, y=standard_y, mode='markers+text', text=standard_text, textposition="top center", name='Standard Bus (0)', marker=dict(color='#4ECDC4', size=24)),
-                    go.Scatter(x=nc_x, y=nc_y, mode='markers+text', text=nc_text, textposition="top center", name='Non-candidate Bus', marker=dict(color='#E0E0E0', size=24))
+                    go.Scatter(x=nc_x, y=nc_y, mode='markers+text', text=nc_text, textposition="top center", name='Non-candidate Bus', marker=dict(color='#E0E0E0', size=24)),
+                    ai_trace,
+                    *outage_data_traces
                 ],
                 layout=go.Layout(
                     title=dict(text=title_text, font=dict(size=14)),
@@ -918,7 +1080,7 @@ try:
                     margin=dict(b=20, l=5, r=5, t=60),
                     xaxis=dict(showgrid=False, zeroline=False, showticklabels=False),
                     yaxis=dict(showgrid=False, zeroline=False, showticklabels=False),
-                    width=800, height=600,
+                    width=850, height=650,
                     template="plotly_white"
                 )
             )
