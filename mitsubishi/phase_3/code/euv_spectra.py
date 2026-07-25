@@ -646,11 +646,9 @@ import pickle
 # Ensure JAX uses float64 for factorization alignment
 config.update("jax_enable_x64", True)
 
-def get_active_space_dipole_operators(symbols, geometry, active_electrons, active_orbitals, use_orbital_prep=False, mo_coeff=None):
+def get_active_space_dipole_integrals(symbols, geometry, active_electrons, active_orbitals, use_orbital_prep=False, mo_coeff=None):
     import numpy as np
-    import pennylane as qml
     from pyscf import gto, scf
-    from openfermion import FermionOperator, jordan_wigner
     
     mol = gto.Mole()
     mol.atom = list(zip(symbols, geometry))
@@ -687,23 +685,11 @@ def get_active_space_dipole_operators(symbols, geometry, active_electrons, activ
     for i in range(n_core):
         core_dipole += 2.0 * r_mo[:, i, i]
         
-    dipole_ops = []
-    for rho in range(3):
-        op = FermionOperator('', core_dipole[rho])
-        for u_idx, u in enumerate(active_indices):
-            for v_idx, v in enumerate(active_indices):
-                coeff = r_mo[rho, u, v]
-                if abs(coeff) < 1e-8:
-                    continue
-                op += FermionOperator(f'{2*u_idx}^ {2*v_idx}', coeff)
-                op += FermionOperator(f'{2*u_idx+1}^ {2*v_idx+1}', coeff)
-                
-        qubit_op = jordan_wigner(op)
-        from openfermion import get_sparse_operator
-        sp_op = get_sparse_operator(qubit_op, n_qubits=int(2*active_orbitals))
-        dipole_ops.append(sp_op)
-        
-    return dipole_ops
+    r_mo_active = r_mo[:, active_indices, :][:, :, active_indices]
+    return r_mo_active, core_dipole
+
+# Alias for backward compatibility
+get_active_space_dipole_operators = get_active_space_dipole_integrals
 
 # Define absorption caching directory and path
 absorption_cache_dir = os.path.join(current_file_dir, "data", "absorption")
@@ -798,29 +784,40 @@ if not use_cache_absorption:
 
 # %%
 if not use_cache_absorption:
-    # Dipole moment operator in molecular orbital basis
-    m_rho = get_active_space_dipole_operators(
+    from pyscf import fci
+
+    # Retrieve dipole moment integrals in active space MO basis
+    r_mo_active, core_dipole = get_active_space_dipole_integrals(
         symbols, geometry, n_electron_cas, n_cas, use_orbital_prep=USE_ORBITAL_PREP, mo_coeff=hf.mo_coeff
     )
-    rhos = range(len(m_rho))
+    rhos = range(3)
 
     wf_dipole = []
     dipole_norm = []
+    nelec_tuple = (n_electron_cas // 2, n_electron_cas // 2)
 
-    # Project initial state using the dipole moment operators (using SciPy CSR sparse matrix to avoid 2^N dense RAM explosion)
+    # Project initial state using PySCF CI-space 1-body contraction (avoids 2^N OpenFermion sparse matrix RAM explosion)
     for rho in rhos:
-        sp_mat = m_rho[rho]
-        wf = sp_mat.dot(wf_casci)
-        if hasattr(wf, "toarray"):
-            wf = wf.toarray().ravel()
+        ci_dip = fci.direct_spin1.contract_1e(r_mo_active[rho], casci_state, n_cas, nelec_tuple)
+        ci_dip = ci_dip + core_dipole[rho] * casci_state
 
-        if np.allclose(wf, np.zeros_like(wf)):
-            wf_dipole.append(wf)
+        ci_dip[np.abs(ci_dip) < 1e-6] = 0.0
+        sparse_dip = coo_matrix(ci_dip, shape=np.shape(ci_dip), dtype=float)
+        row, col, dat = sparse_dip.row, sparse_dip.col, sparse_dip.data
+
+        if len(dat) == 0:
+            wf_dipole.append(np.zeros(2**(2*n_cas)))
             dipole_norm.append(0.0)
         else:
-            norm_val = np.linalg.norm(wf)
+            norm_val = float(np.linalg.norm(dat))
             dipole_norm.append(norm_val)
-            wf_dipole.append(wf / norm_val)
+
+            strs_row = addrs2str(n_cas, n_electron_cas // 2, row)
+            strs_col = addrs2str(n_cas, n_electron_cas // 2, col)
+            wf_dict = dict(zip(list(zip(strs_row, strs_col)), dat / norm_val))
+            wf_dict = _sign_chem_to_phys(wf_dict, n_cas)
+            wf = _wfdict_to_statevector(wf_dict, n_cas)
+            wf_dipole.append(wf)
 
 # %% [markdown]
 # ## Step 1.3: Compressed Double Factorization (CDF) of the Hamiltonian
