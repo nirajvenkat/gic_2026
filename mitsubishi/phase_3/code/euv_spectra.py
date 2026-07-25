@@ -72,22 +72,24 @@ current_file_dir = get_current_file_dir()
 #
 # Configure the execution parameters for the simulation:
 #
-# * **`HARDWARE_TARGET`**: Target hardware execution platform. Choose between `"Mac"` (local Apple Silicon Mac), `"H100"` (8x NVIDIA H100 GPU cluster), and `"B200"` (8x NVIDIA B200 GPU cluster). Automatically manages `USE_CUDA` and active-space qubit allocations.
+# * **`HARDWARE_TARGET`**: Target hardware execution platform. Options: `"Mac"` (local Apple Silicon Mac), `"H100"` (8x NVIDIA H100 GPU cluster), or `"B200"` (8x NVIDIA B200 GPU cluster). Automatically manages `USE_CUDA` and active-space qubit allocations.
 # * **`USE_DIT`**: If `True`, enable Diffusion Transformer (DIT) for GQE training as an alternative to the auto-regressive GPTnano.
 # * **`USE_ORBITAL_PREP`**: If `True`, apply pre-quantum classical orbital and integral preprocessing (ECP, AVAS, CVS) for heavy atoms to reduce/separate the molecular space before qubit mapping.
 # * **`USE_CDF`**: Enable Compressed Double Factorization (CDF) to calculate low-rank Hamiltonian approximations for both absorption and emission paths.
+# * **`USE_BLISS`**: Block-Invariant Symmetry Shift options. Choose `"lp"` (our LP-BLISS), `"pl"` (PennyLane `symmetry_shift`), or `None` / `False`.
 # * **`USE_ANALYTIC_ABSORPTION`**: If `True`, use exact (analytic) statevector expectation values for the Hadamard-test measurements in the absorption simulation, removing shot noise. Set to `False` to simulate finite-shot sampling with an exponentially-decaying kernel allocation.
-
+# * **`MAX_CDF_FRAGMENTS`**: Maximum dominant CDF two-body fragments to retain for Trotter evolution (e.g. `10`). Set to `0` or `None` for unrestricted (retains all fragments).
 
 # %%
 target_molecule = "IMePh"
 
-HARDWARE_TARGET = "Mac"  # Options: "Mac" (Apple Silicon Mac), "H100" (8x H100 SXM5), "B200" (8x B200 SXM6)
+HARDWARE_TARGET = "Mac"
 USE_DIT = False
 USE_ORBITAL_PREP = True
 USE_CDF = True
-USE_BLISS = None  # Options: "lp" (our LP-BLISS), "pl" (PennyLane symmetry_shift), or None / False
+USE_BLISS = None
 USE_ANALYTIC_ABSORPTION = True
+MAX_CDF_FRAGMENTS = 10
 
 # Hardware-specific auto-configuration
 import torch
@@ -222,10 +224,12 @@ def compute_cdf_hamiltonian(molecule, hamiltonian, use_orbital_prep, active_elec
             _, two_body_cores, two_body_leaves = qml.qchem.factorize(
                 two_shift, compressed=True
             )
-    else:
-        _, two_body_cores, two_body_leaves = qml.qchem.factorize(
-            two_shift, compressed=True
-        )
+    # Optional truncation of two-body CDF fragments to speed up gate evolution (0 or None = unrestricted)
+    max_fragments = globals().get("MAX_CDF_FRAGMENTS", None)
+    if max_fragments and isinstance(max_fragments, int) and max_fragments > 0 and two_body_cores.shape[0] > max_fragments:
+        print(f"Truncating CDF two-body fragments from {two_body_cores.shape[0]} to top {max_fragments} for fast Trotter evolution...")
+        two_body_cores = two_body_cores[:max_fragments]
+        two_body_leaves = two_body_leaves[:max_fragments]
 
 
     # One-body correction
@@ -878,16 +882,22 @@ if not use_cache_absorption:
 if not use_cache_absorption:
     # Setup simulated device and QNodes
     device_type = "lightning.gpu" if USE_CUDA else "lightning.qubit"
-    dev_prop = qml.device(device_type, wires=int(2*n_cas) + 1)
+    if USE_CUDA:
+        dev_prop = qml.device(device_type, wires=int(2*n_cas) + 1, c_dtype=np.complex64)
+    else:
+        dev_prop = qml.device(device_type, wires=int(2*n_cas) + 1)
 
     # Simulation parameters
     eta = 0.05
     H_norm = np.pi
     tau = np.pi / (2 * H_norm)
 
+    state_precision_dtype = np.complex64 if USE_CUDA else np.complex128
+
     @qml.qnode(dev_prop)
     def initial_circuit(wf):
-        qml.StatePrep(wf, wires=dev_prop.wires.tolist()[1:])
+        wf_prep = np.asarray(wf, dtype=state_precision_dtype)
+        qml.StatePrep(wf_prep, wires=dev_prop.wires.tolist()[1:])
         qml.Hadamard(wires=0)
         return qml.state()
 
@@ -950,7 +960,7 @@ if not use_cache_absorption:
     # Define compiled step and measurement QNodes to avoid recompiling overhead
     @qml.qnode(dev_prop)
     def trotter_step_circuit(state_in):
-        state_clean = np.asarray(state_in, dtype=np.complex128)
+        state_clean = np.asarray(state_in, dtype=state_precision_dtype)
         state_clean = state_clean / np.linalg.norm(state_clean)
         qml.StatePrep(state_clean, wires=dev_prop.wires.tolist())
         if USE_CDF:
@@ -965,7 +975,7 @@ if not use_cache_absorption:
 
     @qml.qnode(dev_prop)
     def measurement_circuit(state_in):
-        state_clean = np.asarray(state_in, dtype=np.complex128)
+        state_clean = np.asarray(state_in, dtype=state_precision_dtype)
         state_clean = state_clean / np.linalg.norm(state_clean)
         qml.StatePrep(state_clean, wires=dev_prop.wires.tolist())
         return [qml.expval(op) for op in [qml.PauliX(wires=0), qml.PauliY(wires=0)]]
