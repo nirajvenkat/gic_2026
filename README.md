@@ -35,9 +35,9 @@ jupytext --to notebook mitsubishi/phase_3/code/euv_spectra.py
 
 ## DOE OTC Challenge specific instructions
 
-- Attempting to run `USE_SAMPLOMATIC=True` with `USE_QPU=False` is not supported by Qiskit Aer; we are exploring a workaround in a separate `smatic-noqpu` branch. However this is extremely slow (6 hours per run) and not recommended. Overall `USE_SAMPLOMATIC` remains untested due to QPU access issues.
+- We use the Defining Point Algorithm (DPA) as the gold-standard classical benchmark. This binary must be built and placed near the `grid_opt` notebook. See the [DPA compilation guide](doe/phase_3/doc/COMPILATION_GUIDE.md).
 
-- 
+- Samplomatic does not support the Qiskit Aer simulator. Therefore `USE_SAMPLOMATIC=True` with `USE_QPU=False` fails. We are exploring a workaround in a separate `smatic-noqpu` branch, but this is extremely slow (6 hours per run) and not recommended. We were not able to test the `USE_SAMPLOMATIC` setting on QPUs.
 
 ## Mitsubishi/AIST Challenge specific instructions
 
@@ -54,5 +54,4 @@ jupytext --to notebook mitsubishi/phase_3/code/euv_spectra.py
     
     *(If your environment still complains after this, replace cu121 with cu118 in the URL to use the ultra-compatible CUDA 11.8 build).*
 
-- [OpenMolcas Guide](mitsubishi/external/code/openmolcas_precomputation_guide.md)
-In the last cell we need OpenMolcas RASSI files to view the classical Auger spectrum alongside the quantum (GQE + q-sc-EOM + OCA) one. 
+- See [OpenMolcas Guide](mitsubishi/external/code/openmolcas_precomputation_guide.md) to plot a classical Auger spectrum for smaller molecules. The last cell in `euv_spectra` notebook can take OpenMolcas RASSI files to view the classical Auger spectrum alongside the quantum (GQE + q-sc-EOM + OCA) spectrum. Alternatively, for $\rm{H_2O}$, you may find the files here: [H2O_auger_data](https://drive.google.com/drive/folders/1wt1W31JQZ0AaxqLCQr5WzMl2fZ6KqoNg?usp=drive_link). These files must be placed in `data/openmolcas` alongside the notebook.
