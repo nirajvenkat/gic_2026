@@ -1213,7 +1213,20 @@ def get_subsequence_energies(op_seq):
     return np.array(energies)
 
 # Verify with a tiny sequence
-print(get_subsequence_energies([[op_pool[0], op_pool[1]]]))
+# print(get_subsequence_energies([[op_pool[0], op_pool[1]]]))
+
+@qml.qnode(dev)
+def final_energy_circuit(gqe_ops):
+    """Executes a sequence of GQE operators and measures final ground state energy directly (single pass, no snapshots)."""
+    qml.BasisState(init_state, wires=range(num_qubits))
+    for op in gqe_ops:
+        qml.apply(op)
+    return qml.expval(meas_hamiltonian)
+
+def get_final_energies(gen_op_seq):
+    """Evaluates final state energy for a batch of operator sequences in a single pass."""
+    energies = [float(final_energy_circuit(ops)) for ops in gen_op_seq]
+    return np.array(energies).reshape(-1, 1)
 
 # %% [markdown]
 # ## GQE Training & Dataset Hyperparameters
@@ -1560,7 +1573,7 @@ class DITQE(GPT):
 # We configure the model hyperparameters, initialize the optimizer, and train the Generative Quantum Eigensolver (GQE) network. Every 500 epochs, we sample candidate sequences and evaluate their energies to monitor convergence towards the physical ground state.
 
 # %%
-# Select best available device: prefer MPS, then CUDA, then CPU
+# Select best available device: prefer CUDA, then MPS (Mac), then CPU
 import torch
 import pandas as pd
 from tqdm.auto import tqdm
@@ -1569,10 +1582,9 @@ if USE_CUDA and torch.cuda.is_available():
     device = "cuda"
 elif torch.backends.mps.is_available():
     device = "mps"
-elif torch.cuda.is_available():
-    device = "cuda"
 else:
     device = "cpu"
+    
 # Some optimizer helpers expect either 'cuda' or 'cpu' — map MPS to cpu for those APIs
 device_type_opt = "cuda" if device == "cuda" else "cpu"
 print(f"Using device: {device} (optimizer device type: {device_type_opt})")
@@ -1644,7 +1656,7 @@ if not has_cache:
                 # For GPT evaluation
                 gpt.eval()
                 gen_kwargs = {
-                    "n_sequences": 100, 
+                    "n_sequences": 16, 
                     "max_new_tokens": seq_len, 
                     "temperature": 0.001, 
                     "device": device
@@ -1663,7 +1675,7 @@ if not has_cache:
 
                 gen_inds = (gen_token_seq[:, 1:] - 1).cpu().numpy()
                 gen_op_seq = op_pool[gen_inds]
-                true_Es = get_subsequence_energies(gen_op_seq)[:, -1].reshape(-1, 1)
+                true_Es = get_final_energies(gen_op_seq)
 
                 # Move PyTorch model back to GPU for training
                 if device == "cuda":
@@ -1823,7 +1835,7 @@ if df_compare_Es is None:
 
         gen_inds_ = (gen_token_seq_[:, 1:] - 1).cpu().numpy()
         gen_op_seq_ = op_pool[gen_inds_]
-        true_Es_ = get_subsequence_energies(gen_op_seq_)[:, -1].reshape(-1, 1)
+        true_Es_ = get_final_energies(gen_op_seq_)
 
         # Best model
         loaded = torch.load(model_path, map_location=device, weights_only=False)
@@ -1835,7 +1847,7 @@ if df_compare_Es is None:
 
         loaded_inds_ = (loaded_token_seq_[:, 1:] - 1).cpu().numpy()
         loaded_op_seq_ = op_pool[loaded_inds_]
-        loaded_true_Es_ = get_subsequence_energies(loaded_op_seq_)[:, -1].reshape(-1, 1)
+        loaded_true_Es_ = get_final_energies(loaded_op_seq_)
 
         # Summary table
         df_compare_Es = pd.DataFrame({
