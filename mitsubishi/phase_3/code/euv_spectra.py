@@ -47,11 +47,6 @@
 # %config InlineBackend.figure_format = 'retina'
 
 import os
-# Allow PyTorch MKL and PennyLane GCC OpenMP runtimes to coexist in the same process
-os.environ["KMP_DUPLICATE_LIBOK"] = "TRUE"
-# Cap OpenMP threads to prevent CPU thread-pool mutex thrashing
-os.environ["OMP_NUM_THREADS"] = "8"
-os.environ["MKL_NUM_THREADS"] = "8"
 import sys
 import pickle
 import matplotlib.pyplot as plt
@@ -415,7 +410,7 @@ def generate_molecule_data(molecule_name="H2", source="qchem", local_dataset_pat
             if torch.cuda.is_available() and torch.cuda.device_count() <= 1:
                 # Single H100 / H200 GPU instance (141 GB VRAM / 180 GB RAM):
                 # 30 active-space qubits + 1 ancilla = 31 qubits (requires ~34 GB VRAM / 17 GB RAM)
-                active_orbitals = 15
+                active_orbitals = 14
                 active_electrons = 16
             else:
                 # 8x H100 GPU cluster (640 GB VRAM): 32 active-space qubits + 1 ancilla = 33 qubits
@@ -1216,23 +1211,22 @@ def get_subsequence_energies(op_seq):
         )
     return np.array(energies)
 
-# Verify with a tiny sequence
-# print(get_subsequence_energies([[op_pool[0], op_pool[1]]]))
-
-dev_eval = qml.device("lightning.qubit", wires=num_qubits)
-
-@qml.qnode(dev_eval)
+@qml.qnode(dev)
 def final_energy_circuit(gqe_ops):
-    """Executes a sequence of GQE operators and measures final ground state energy directly on CPU (single pass, no GPU VRAM lock)."""
+    """Executes a sequence of GQE operators and measures final ground state energy directly."""
     qml.BasisState(init_state, wires=range(num_qubits))
     for op in gqe_ops:
         qml.apply(op)
     return qml.expval(meas_hamiltonian)
 
 def get_final_energies(gen_op_seq):
-    """Evaluates final state energy for a batch of operator sequences in a single pass on CPU."""
+    """Evaluates final state energy for a batch of operator sequences in a single pass."""
     energies = [float(final_energy_circuit(ops)) for ops in gen_op_seq]
     return np.array(energies).reshape(-1, 1)
+
+# Test the tiny sequence using the fast single-pass function
+print("Testing tiny sequence:", get_final_energies([[op_pool[0], op_pool[1]]]))
+
 
 # %% [markdown]
 # ## GQE Training & Dataset Hyperparameters
@@ -1247,7 +1241,7 @@ def get_final_energies(gen_op_seq):
 # %%
 GQE_TRAIN_SIZE = 128
 GQE_NUM_ITERS = 10000
-GQE_EVAL_FREQ = 100
+GQE_EVAL_FREQ = 2500
 GQE_SAMPLE_EVAL_SIZE = 32
 
 # %% [markdown]
@@ -1676,7 +1670,11 @@ if not has_cache:
 
                 gen_inds = (gen_token_seq[:, 1:] - 1).cpu().numpy()
                 gen_op_seq = op_pool[gen_inds]
-                true_Es = get_final_energies(gen_op_seq)
+                if USE_CUDA:
+                    true_Es = get_final_energies(gen_op_seq)
+                else:
+                    true_Es = get_subsequence_energies(gen_op_seq)[:, -1].reshape(-1, 1)
+                
 
                 mae = np.mean(np.abs(pred_Es - true_Es))
                 ave_E = np.mean(true_Es)
@@ -1832,7 +1830,11 @@ if df_compare_Es is None:
 
         gen_inds_ = (gen_token_seq_[:, 1:] - 1).cpu().numpy()
         gen_op_seq_ = op_pool[gen_inds_]
-        true_Es_ = get_final_energies(gen_op_seq_)
+
+        if USE_CUDA:
+            true_Es_ = get_final_energies(gen_op_seq_)
+        else:
+            true_Es_ = get_subsequence_energies(gen_op_seq_)[:, -1].reshape(-1, 1)
 
         # Best model
         loaded = torch.load(model_path, map_location=device, weights_only=False)
@@ -1846,7 +1848,11 @@ if df_compare_Es is None:
 
         loaded_inds_ = (loaded_token_seq_[:, 1:] - 1).cpu().numpy()
         loaded_op_seq_ = op_pool[loaded_inds_]
-        loaded_true_Es_ = get_final_energies(loaded_op_seq_)
+
+        if USE_CUDA:
+            loaded_true_Es_ = get_final_energies(loaded_op_seq_)
+        else:
+            loaded_true_Es_ = get_subsequence_energies(loaded_op_seq_)[:, -1].reshape(-1, 1)
 
         # Summary table
         df_compare_Es = pd.DataFrame({
