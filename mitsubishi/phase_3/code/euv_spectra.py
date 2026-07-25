@@ -1170,7 +1170,7 @@ import numpy as np
 
 # Select PennyLane device based on USE_CUDA configuration
 if USE_CUDA:
-    dev = qml.device("lightning.gpu", wires=num_qubits)
+    dev = qml.device("lightning.gpu", wires=num_qubits, c_dtype=np.complex64)
 else:
     dev = qml.device("lightning.qubit", wires=num_qubits)
 

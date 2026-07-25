@@ -955,6 +955,8 @@ def qscEOM(
         if shots > 0:
             kwargs["shots"] = shots
         if name is not None:
+            if name == "lightning.gpu" and "c_dtype" not in kwargs:
+                kwargs["c_dtype"] = np.complex64
             return qml.device(name, wires=wires, **kwargs)
         try:
             return qml.device("lightning.qubit", wires=wires, **kwargs)
