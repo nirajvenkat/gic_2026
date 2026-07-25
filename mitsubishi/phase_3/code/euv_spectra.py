@@ -47,7 +47,11 @@
 # %config InlineBackend.figure_format = 'retina'
 
 import os
-os.environ["PYTORCH_CUDA_ALLOC_CONF"] = "expandable_segments:True"
+# Allow PyTorch MKL and PennyLane GCC OpenMP runtimes to coexist in the same process
+os.environ["KMP_DUPLICATE_LIBOK"] = "TRUE"
+# Cap OpenMP threads to prevent CPU thread-pool mutex thrashing
+os.environ["OMP_NUM_THREADS"] = "8"
+os.environ["MKL_NUM_THREADS"] = "8"
 import sys
 import pickle
 import matplotlib.pyplot as plt
@@ -1215,9 +1219,9 @@ def get_subsequence_energies(op_seq):
 # Verify with a tiny sequence
 # print(get_subsequence_energies([[op_pool[0], op_pool[1]]]))
 
-# dev_eval = qml.device("lightning.qubit", wires=num_qubits)
+dev_eval = qml.device("lightning.qubit", wires=num_qubits)
 
-@qml.qnode(dev)
+@qml.qnode(dev_eval)
 def final_energy_circuit(gqe_ops):
     """Executes a sequence of GQE operators and measures final ground state energy directly on CPU (single pass, no GPU VRAM lock)."""
     qml.BasisState(init_state, wires=range(num_qubits))
@@ -1670,15 +1674,9 @@ if not has_cache:
                     gen_token_seq, pred_Es = gpt.generate(**gen_kwargs)
                 pred_Es = pred_Es.cpu().numpy()
 
-                if device == "cuda":
-                    torch.cuda.synchronize()
-
                 gen_inds = (gen_token_seq[:, 1:] - 1).cpu().numpy()
                 gen_op_seq = op_pool[gen_inds]
                 true_Es = get_final_energies(gen_op_seq)
-
-                if device == "cuda":
-                    torch.cuda.synchronize()
 
                 mae = np.mean(np.abs(pred_Es - true_Es))
                 ave_E = np.mean(true_Es)
