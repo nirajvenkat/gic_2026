@@ -47,6 +47,7 @@
 # %config InlineBackend.figure_format = 'retina'
 
 import os
+os.environ["PYTORCH_CUDA_ALLOC_CONF"] = "expandable_segments:True"
 import sys
 import pickle
 import matplotlib.pyplot as plt
@@ -1651,12 +1652,24 @@ if not has_cache:
                 if USE_DIT:
                     gen_kwargs["energies"] = grd_E
                     
-                gen_token_seq, pred_Es = gpt.generate(**gen_kwargs)
+                with torch.no_grad():
+                    gen_token_seq, pred_Es = gpt.generate(**gen_kwargs)
                 pred_Es = pred_Es.cpu().numpy()
+
+                # Offload PyTorch model to CPU & clear CUDA cache to hand 100% of VRAM to PennyLane cuQuantum
+                if device == "cuda":
+                    gpt.cpu()
+                    torch.cuda.empty_cache()
 
                 gen_inds = (gen_token_seq[:, 1:] - 1).cpu().numpy()
                 gen_op_seq = op_pool[gen_inds]
                 true_Es = get_subsequence_energies(gen_op_seq)[:, -1].reshape(-1, 1)
+
+                # Move PyTorch model back to GPU for training
+                if device == "cuda":
+                    gpt.to(device)
+                    torch.cuda.empty_cache()
+                gpt.train()
 
                 mae = np.mean(np.abs(pred_Es - true_Es))
                 ave_E = np.mean(true_Es)
@@ -1802,14 +1815,24 @@ if df_compare_Es is None:
         if USE_DIT:
             gen_kwargs["energies"] = grd_E
 
-        gen_token_seq_, _ = gpt.generate(**gen_kwargs)
+        with torch.no_grad():
+            gen_token_seq_, _ = gpt.generate(**gen_kwargs)
+        if device == "cuda":
+            gpt.cpu()
+            torch.cuda.empty_cache()
+
         gen_inds_ = (gen_token_seq_[:, 1:] - 1).cpu().numpy()
         gen_op_seq_ = op_pool[gen_inds_]
         true_Es_ = get_subsequence_energies(gen_op_seq_)[:, -1].reshape(-1, 1)
 
         # Best model
         loaded = torch.load(model_path, map_location=device, weights_only=False)
-        loaded_token_seq_, _ = loaded.generate(**gen_kwargs)
+        with torch.no_grad():
+            loaded_token_seq_, _ = loaded.generate(**gen_kwargs)
+        if device == "cuda":
+            loaded.cpu()
+            torch.cuda.empty_cache()
+
         loaded_inds_ = (loaded_token_seq_[:, 1:] - 1).cpu().numpy()
         loaded_op_seq_ = op_pool[loaded_inds_]
         loaded_true_Es_ = get_subsequence_energies(loaded_op_seq_)[:, -1].reshape(-1, 1)
