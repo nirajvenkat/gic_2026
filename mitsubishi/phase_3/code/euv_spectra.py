@@ -1228,7 +1228,7 @@ print(get_subsequence_energies([[op_pool[0], op_pool[1]]]))
 GQE_TRAIN_SIZE = 128
 GQE_NUM_ITERS = 10000
 GQE_EVAL_FREQ = 2500
-GQE_SAMPLE_EVAL_SIZE = 128
+GQE_SAMPLE_EVAL_SIZE = 32
 
 # %% [markdown]
 # ## Dataset Generation
