@@ -1215,9 +1215,9 @@ def get_subsequence_energies(op_seq):
 # Verify with a tiny sequence
 # print(get_subsequence_energies([[op_pool[0], op_pool[1]]]))
 
-dev_eval = qml.device("lightning.qubit", wires=num_qubits)
+# dev_eval = qml.device("lightning.qubit", wires=num_qubits)
 
-@qml.qnode(dev_eval)
+@qml.qnode(dev)
 def final_energy_circuit(gqe_ops):
     """Executes a sequence of GQE operators and measures final ground state energy directly on CPU (single pass, no GPU VRAM lock)."""
     qml.BasisState(init_state, wires=range(num_qubits))
@@ -1243,7 +1243,7 @@ def get_final_energies(gen_op_seq):
 # %%
 GQE_TRAIN_SIZE = 128
 GQE_NUM_ITERS = 10000
-GQE_EVAL_FREQ = 2500
+GQE_EVAL_FREQ = 100
 GQE_SAMPLE_EVAL_SIZE = 32
 
 # %% [markdown]
@@ -1670,9 +1670,15 @@ if not has_cache:
                     gen_token_seq, pred_Es = gpt.generate(**gen_kwargs)
                 pred_Es = pred_Es.cpu().numpy()
 
+                if device == "cuda":
+                    torch.cuda.synchronize()
+
                 gen_inds = (gen_token_seq[:, 1:] - 1).cpu().numpy()
                 gen_op_seq = op_pool[gen_inds]
                 true_Es = get_final_energies(gen_op_seq)
+
+                if device == "cuda":
+                    torch.cuda.synchronize()
 
                 mae = np.mean(np.abs(pred_Es - true_Es))
                 ave_E = np.mean(true_Es)
