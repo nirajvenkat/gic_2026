@@ -1043,21 +1043,10 @@ def qscEOM(
     # This preserves Rayleigh-Ritz variational behavior (with include_identity=True, the
     # ADAPT state is included in the subspace).
     if shots == 0:
-        def _state_chunk(chunk_indices):
-            local_dev = _make_device(device_name, qubits)
-            circuit_state_local = _build_circuit_state(local_dev)
-            out = {}
-            for idx in chunk_indices:
-                out[idx] = np.asarray(
-                    circuit_state_local(
-                        params,
-                        list1[idx],
-                        null_state,
-                        ash_excitation,
-                    ),
-                    dtype=complex,
-                )
-            return out
+        if resolved_projector_backend == "sparse_number_preserving":
+            sector_indices = np.asarray(_jw_number_sector_indices(int(active_electrons), int(qubits)), dtype=int)
+        else:
+            sector_indices = None
 
         state_map = {}
         try:
@@ -1066,83 +1055,35 @@ def qscEOM(
         except ImportError:
             pbar = None
 
-        if parallel_matrix and worker_count > 1 and n_states > 1:
-            chunk_size = _resolve_chunk_size(
-                total_items=n_states,
-                worker_count=worker_count,
-                user_chunk_size=matrix_chunk_size,
+        local_dev = _make_device(device_name, qubits)
+        circuit_state_local = _build_circuit_state(local_dev)
+        for idx in range(n_states):
+            vec = np.asarray(
+                circuit_state_local(
+                    params,
+                    list1[idx],
+                    null_state,
+                    ash_excitation,
+                ),
+                dtype=np.complex64,
             )
-            chunked_indices = list(_iter_chunks(list(range(n_states)), chunk_size))
-            state_executor = None
-            try:
-                if backend == "process":
-                    payload = {
-                        "qubits": int(qubits),
-                        "params": np.asarray(params),
-                        "ash_excitation": tuple(tuple(int(v) for v in exc) for exc in ash_excitation),
-                        "list1": tuple(tuple(int(v) for v in occ) for occ in list1),
-                        "null_state": np.asarray(null_state),
-                        "ansatz_type": ansatz_type,
-                        "device_name": device_name,
-                        "device_kwargs": device_kwargs_local,
-                    }
-                    try:
-                        mp_context = mp.get_context("fork")
-                    except ValueError:
-                        mp_context = mp.get_context()
-                    try:
-                        state_executor = ProcessPoolExecutor(
-                            max_workers=worker_count,
-                            mp_context=mp_context,
-                            initializer=_qsceom_state_worker_init,
-                            initargs=(payload,),
-                        )
-                    except (PermissionError, OSError, NotImplementedError):
-                        state_executor = None
-                elif backend == "thread":
-                    state_executor = ThreadPoolExecutor(max_workers=worker_count)
-
-                if state_executor is not None:
-                    if backend == "process":
-                        futures = [
-                            state_executor.submit(_qsceom_state_worker_chunk, chunk)
-                            for chunk in chunked_indices
-                        ]
-                    else:
-                        futures = [state_executor.submit(_state_chunk, chunk) for chunk in chunked_indices]
-                    for future in as_completed(futures):
-                        res = future.result()
-                        state_map.update(res)
-                        if pbar is not None:
-                            pbar.update(len(res))
-                else:
-                    for idx in range(n_states):
-                        state_map.update(_state_chunk([idx]))
-                        if pbar is not None:
-                            pbar.update(1)
-            finally:
-                if state_executor is not None:
-                    state_executor.shutdown(wait=True)
-        else:
-            local_dev = _make_device(device_name, qubits)
-            circuit_state_local = _build_circuit_state(local_dev)
-            for idx in range(n_states):
-                state_map[idx] = np.asarray(
-                    circuit_state_local(
-                        params,
-                        list1[idx],
-                        null_state,
-                        ash_excitation,
-                    ),
-                    dtype=complex,
-                )
-                if pbar is not None:
-                    pbar.update(1)
+            if sector_indices is not None:
+                vec = vec[sector_indices]
+            state_map[idx] = vec
+            if pbar is not None:
+                pbar.update(1)
 
         if pbar is not None:
             pbar.close()
 
-        basis_states = np.column_stack([state_map[i] for i in range(n_states)])
+        if sector_indices is not None:
+            restricted_basis_states = np.column_stack([state_map[i] for i in range(n_states)])
+            basis_states = None
+        else:
+            basis_states = np.column_stack([state_map[i] for i in range(n_states)])
+            restricted_basis_states = None
+        del state_map
+
         if resolved_projector_backend == "sparse_number_preserving":
             if brg_tolerance is not None:
                 fermion_operator, sparse_brg_details = _build_brg_fermion_operator(
@@ -1172,11 +1113,12 @@ def qscEOM(
                 qubits=qubits,
                 active_electrons=active_electrons,
             )
-            restricted_basis_states, _sector_indices = _restrict_basis_states_to_number_sector(
-                basis_states,
-                active_electrons=active_electrons,
-                qubits=qubits,
-            )
+            if restricted_basis_states is None:
+                restricted_basis_states, _sector_indices = _restrict_basis_states_to_number_sector(
+                    basis_states,
+                    active_electrons=active_electrons,
+                    qubits=qubits,
+                )
             brg_details.update(sparse_details)
             M_exact = restricted_basis_states.conj().T @ (sparse_hamiltonian @ restricted_basis_states)
         else:
