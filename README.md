@@ -35,7 +35,7 @@ jupytext --to notebook mitsubishi/phase_3/code/euv_spectra.py
 
 ## DOE OTC Challenge specific instructions
 
-- We use the Defining Point Algorithm (DPA) as the gold-standard classical benchmark. This binary must be built and placed near the `grid_opt` notebook. See the [DPA compilation guide](doe/phase_3/doc/COMPILATION_GUIDE.md).
+- We use the Defining Point Algorithm (DPA) as the gold-standard classical benchmark. This binary must be built and placed near the `grid_opt` notebook. See the [DPA compilation guide](doe/external/code/dpa/dpa_compilation_guide.md).
 
 - Samplomatic does not support the Qiskit Aer simulator. Therefore `USE_SAMPLOMATIC=True` with `USE_QPU=False` fails. We are exploring a workaround in a separate `smatic-noqpu` branch, but this is extremely slow (6 hours per run) and not recommended. We were not able to test the `USE_SAMPLOMATIC` setting on QPUs.
 
