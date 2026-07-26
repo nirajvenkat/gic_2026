@@ -1242,13 +1242,15 @@ else:
 # * **`GQE_TRAIN_SIZE`**: Number of operator sequences generated in the training set (default: `1024`).
 # * **`GQE_NUM_ITERS`**: Total training iterations/epochs for GQE model optimization (default: `10000`).
 # * **`GQE_EVAL_FREQ`**: Iteration interval for computing evaluation loss and logging generated sequence performance (default: `500`).
+# * **`GQE_TRAINING_SEQ_SIZE`**: Number of sequences sampled during training (default: `128`).
 # * **`GQE_SAMPLE_EVAL_SIZE`**: Number of sequences sampled during model evaluation and random baseline comparisons (default: `128`).
 
 # %%
 GQE_TRAIN_SIZE = 128
 GQE_NUM_ITERS = 10000
 GQE_EVAL_FREQ = 2500
-GQE_SAMPLE_EVAL_SIZE = 32
+GQE_TRAINING_SEQ_SIZE = 8
+GQE_SAMPLE_EVAL_SIZE = 8
 
 # %% [markdown]
 # ## Dataset Generation
@@ -1980,6 +1982,7 @@ if not has_cache:
         method="openfermion", # Needed to support open shell
         shots=0, 
         device_name=device_name_qsceom,
+        projector_backend="sparse_number_preserving",
         return_details=True,
         outpath=datasets_pyscf_dir,
         use_orbital_prep=USE_ORBITAL_PREP,
@@ -2003,6 +2006,7 @@ if not has_cache:
         method="openfermion", # Consistency
         shots=0, 
         device_name=device_name_qsceom,
+        projector_backend="sparse_number_preserving",
         return_details=True,
         outpath=datasets_pyscf_dir,
         use_orbital_prep=USE_ORBITAL_PREP,

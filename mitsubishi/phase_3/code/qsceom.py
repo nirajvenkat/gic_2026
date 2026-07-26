@@ -904,10 +904,8 @@ def qscEOM(
             except ImportError:
                 resolved_projector_backend = "dense"
             else:
-                if qubits > 16:
-                    resolved_projector_backend = "dense"
-                else:
-                    resolved_projector_backend = "sparse_number_preserving"
+                # Direct sparse number-preserving path for fixed electron sectors
+                resolved_projector_backend = "sparse_number_preserving"
         else:
             resolved_projector_backend = "dense"
     else:
@@ -1182,7 +1180,8 @@ def qscEOM(
             pbar = None
 
         if resolved_projector_backend == "sparse_number_preserving":
-            batch_size = max(1, min(100, n_states))
+            max_batch = 10 if qubits > 20 else 100
+            batch_size = max(1, min(max_batch, n_states))
             for j_start in range(0, n_states, batch_size):
                 j_end = min(j_start + batch_size, n_states)
                 V_J = np.column_stack([
@@ -1226,7 +1225,7 @@ def qscEOM(
                     tensor = psi_j.reshape([2] * qubits)
                     for c, op in zip(coeffs, ops):
                         if isinstance(op, qml.ops.Identity) or getattr(op, 'name', '') == 'Identity':
-                            w_j += float(c) * psi_j
+                            w_j += c * psi_j
                             continue
                         op_list = op.operands if hasattr(op, 'operands') else [op]
                         wires = sorted(list(set(w for p in op_list for w in p.wires)))
@@ -1245,7 +1244,7 @@ def qscEOM(
                         flat = tensor_perm.reshape((dim_other, dim_target))
                         res_flat = flat @ local_mat.T
                         res_tensor = res_flat.reshape(shape_orig)
-                        w_j += float(c) * np.transpose(res_tensor, inv_perm).reshape(-1)
+                        w_j += c * np.transpose(res_tensor, inv_perm).reshape(-1)
                     for i in range(n_states):
                         psi_i = np.asarray(forward_circuit(list1[i]), dtype=np.complex64)
                         M_exact[i, j] = np.vdot(psi_i, w_j)
