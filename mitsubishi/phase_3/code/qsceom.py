@@ -896,6 +896,7 @@ def qscEOM(
             "`pip install numpy pennylane`."
         ) from exc
 
+    qubits = 2 * int(active_orbitals)
     if projector_backend == "auto":
         if shots == 0 and method_normalized in {"pyscf", "openfermion"}:
             try:
@@ -903,14 +904,16 @@ def qscEOM(
             except ImportError:
                 resolved_projector_backend = "dense"
             else:
-                resolved_projector_backend = "sparse_number_preserving"
+                if qubits > 16:
+                    resolved_projector_backend = "dense"
+                else:
+                    resolved_projector_backend = "sparse_number_preserving"
         else:
             resolved_projector_backend = "dense"
     else:
         resolved_projector_backend = projector_backend
 
     H = None
-    qubits = 2 * int(active_orbitals)
     if shots != 0 or resolved_projector_backend == "dense":
         if use_orbital_prep and "I" in symbols:
             # Construct H from ECP integrals classically
@@ -936,17 +939,40 @@ def qscEOM(
             H = qml.from_openfermion(qubit_op)
             qubits = 2 * int(active_orbitals)
         else:
-            H, qubits = qml.qchem.molecular_hamiltonian(
-                symbols,
-                geometry,
-                basis=basis,
-                method=method,
-                active_electrons=active_electrons,
-                active_orbitals=active_orbitals,
-                charge=charge,
-                mult=mult,
-                outpath=outpath,
-            )
+            if method_normalized == "openfermion":
+                from openfermion import InteractionOperator, get_fermion_operator, jordan_wigner
+                core_constant, one_mo, two_mo = _build_pyscf_molecular_integrals(
+                    symbols=symbols,
+                    geometry=geometry,
+                    basis=basis,
+                    charge=charge,
+                    mult=mult,
+                    active_electrons=active_electrons,
+                    active_orbitals=active_orbitals,
+                    use_orbital_prep=use_orbital_prep,
+                )
+                one_spin, two_spin = _expand_spatial_integrals_to_spin_orbital(one_mo, two_mo)
+                interaction = InteractionOperator(
+                    float(np.asarray(core_constant, dtype=float).reshape(-1)[0]),
+                    one_spin,
+                    two_spin,
+                )
+                ferm_op = get_fermion_operator(interaction)
+                qubit_op = jordan_wigner(ferm_op)
+                H = qml.from_openfermion(qubit_op)
+                qubits = 2 * int(active_orbitals)
+            else:
+                H, qubits = qml.qchem.molecular_hamiltonian(
+                    symbols,
+                    geometry,
+                    basis=basis,
+                    method=method,
+                    active_electrons=active_electrons,
+                    active_orbitals=active_orbitals,
+                    charge=charge,
+                    mult=mult,
+                    outpath=outpath,
+                )
         if pauli_grouping and H is not None and hasattr(H, "compute_grouping"):
             H.compute_grouping(grouping_type=grouping_type)
 
@@ -1116,11 +1142,6 @@ def qscEOM(
             brg_details.update(sparse_details)
 
             sector_indices = np.asarray(_jw_number_sector_indices(int(active_electrons), int(qubits)), dtype=int)
-            pos_map = {val: pos for pos, val in enumerate(sector_indices)}
-            det_positions = np.array(
-                [pos_map[sum(1 << (qubits - 1 - int(orb)) for orb in occ)] for occ in list1],
-                dtype=int,
-            )
         else:
             if brg_tolerance is not None:
                 H_dense, dense_brg_details = _build_brg_hamiltonian_dense(
@@ -1135,14 +1156,12 @@ def qscEOM(
                     use_orbital_prep=use_orbital_prep,
                 )
                 brg_details.update(dense_brg_details)
-            else:
+            elif qubits <= 16 and H is not None:
                 H_dense = np.asarray(qml.matrix(H, wire_order=range(qubits)), dtype=complex)
+            else:
+                H_dense = None
 
             sector_indices = None
-            det_positions = np.array(
-                [sum(1 << (qubits - 1 - int(orb)) for orb in occ) for occ in list1],
-                dtype=int,
-            )
 
         local_dev = _make_device(device_name, qubits)
 
@@ -1154,40 +1173,84 @@ def qscEOM(
                 _apply_excitation_gate(qml, excitations, params[i], ansatz_type)
             return qml.state()
 
-        @qml.qnode(local_dev)
-        def backward_circuit(state_in):
-            qml.StatePrep(state_in, wires=range(qubits))
-            for i in reversed(range(len(ash_excitation))):
-                _apply_excitation_gate(qml, ash_excitation[i], -params[i], ansatz_type)
-            return qml.state()
-
         M_exact = np.zeros((n_states, n_states), dtype=np.complex64)
 
         try:
             from tqdm.auto import tqdm
-            pbar = tqdm(total=n_states, desc=f"qscEOM Streamed Matrix ({active_electrons}e, {active_orbitals}o)", unit="state")
+            pbar = tqdm(total=n_states, desc=f"qscEOM Matrix ({active_electrons}e, {active_orbitals}o)", unit="state")
         except ImportError:
             pbar = None
 
         if resolved_projector_backend == "sparse_number_preserving":
-            w_j_full = np.zeros(2**qubits, dtype=np.complex64)
-            for j in range(n_states):
-                psi_j_sector = np.asarray(forward_circuit(list1[j]), dtype=np.complex64)[sector_indices]
-                w_j_sector = sparse_hamiltonian @ psi_j_sector
-                w_j_full.fill(0)
-                w_j_full[sector_indices] = w_j_sector
-                v_j_sector = np.asarray(backward_circuit(w_j_full), dtype=np.complex64)[sector_indices]
-                M_exact[:, j] = v_j_sector[det_positions]
+            batch_size = max(1, min(100, n_states))
+            for j_start in range(0, n_states, batch_size):
+                j_end = min(j_start + batch_size, n_states)
+                V_J = np.column_stack([
+                    np.asarray(forward_circuit(list1[j]), dtype=np.complex64)[sector_indices]
+                    for j in range(j_start, j_end)
+                ])
+                W_J = sparse_hamiltonian @ V_J
+                for i_start in range(0, n_states, batch_size):
+                    i_end = min(i_start + batch_size, n_states)
+                    V_I = np.column_stack([
+                        np.asarray(forward_circuit(list1[i]), dtype=np.complex64)[sector_indices]
+                        for i in range(i_start, i_end)
+                    ])
+                    M_exact[i_start:i_end, j_start:j_end] = V_I.conj().T @ W_J
                 if pbar is not None:
-                    pbar.update(1)
+                    pbar.update(j_end - j_start)
         else:
-            for j in range(n_states):
-                psi_j = np.asarray(forward_circuit(list1[j]), dtype=np.complex64)
-                w_j = H_dense @ psi_j
-                v_j = np.asarray(backward_circuit(w_j), dtype=np.complex64)
-                M_exact[:, j] = v_j[det_positions]
-                if pbar is not None:
-                    pbar.update(1)
+            if H_dense is not None:
+                batch_size = max(1, min(50, n_states))
+                for j_start in range(0, n_states, batch_size):
+                    j_end = min(j_start + batch_size, n_states)
+                    V_J = np.column_stack([
+                        np.asarray(forward_circuit(list1[j]), dtype=np.complex64)
+                        for j in range(j_start, j_end)
+                    ])
+                    W_J = H_dense @ V_J
+                    for i_start in range(0, n_states, batch_size):
+                        i_end = min(i_start + batch_size, n_states)
+                        V_I = np.column_stack([
+                            np.asarray(forward_circuit(list1[i]), dtype=np.complex64)
+                            for i in range(i_start, i_end)
+                        ])
+                        M_exact[i_start:i_end, j_start:j_end] = V_I.conj().T @ W_J
+                    if pbar is not None:
+                        pbar.update(j_end - j_start)
+            else:
+                coeffs, ops = H.terms() if hasattr(H, "terms") else (H.coeffs, H.ops)
+                for j in range(n_states):
+                    psi_j = np.asarray(forward_circuit(list1[j]), dtype=np.complex64)
+                    w_j = np.zeros_like(psi_j)
+                    tensor = psi_j.reshape([2] * qubits)
+                    for c, op in zip(coeffs, ops):
+                        if isinstance(op, qml.ops.Identity) or getattr(op, 'name', '') == 'Identity':
+                            w_j += float(c) * psi_j
+                            continue
+                        op_list = op.operands if hasattr(op, 'operands') else [op]
+                        wires = sorted(list(set(w for p in op_list for w in p.wires)))
+                        if not wires:
+                            w_j += float(c) * psi_j
+                            continue
+                        local_mat = np.asarray(qml.matrix(op, wire_order=wires), dtype=np.complex64)
+                        target_axes = [w for w in wires]
+                        other_axes = [w for w in range(qubits) if w not in target_axes]
+                        perm = other_axes + target_axes
+                        inv_perm = np.argsort(perm)
+                        tensor_perm = np.transpose(tensor, perm)
+                        shape_orig = tensor_perm.shape
+                        dim_target = 2 ** len(wires)
+                        dim_other = tensor_perm.size // dim_target
+                        flat = tensor_perm.reshape((dim_other, dim_target))
+                        res_flat = flat @ local_mat.T
+                        res_tensor = res_flat.reshape(shape_orig)
+                        w_j += float(c) * np.transpose(res_tensor, inv_perm).reshape(-1)
+                    for i in range(n_states):
+                        psi_i = np.asarray(forward_circuit(list1[i]), dtype=np.complex64)
+                        M_exact[i, j] = np.vdot(psi_i, w_j)
+                    if pbar is not None:
+                        pbar.update(1)
 
         if pbar is not None:
             pbar.close()
