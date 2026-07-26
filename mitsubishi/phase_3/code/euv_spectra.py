@@ -1248,7 +1248,7 @@ else:
 # %%
 GQE_TRAIN_SIZE = 128
 GQE_NUM_ITERS = 10000
-GQE_EVAL_FREQ = 2500
+GQE_EVAL_FREQ = 500
 GQE_TRAINING_SEQ_SIZE = 8
 GQE_SAMPLE_EVAL_SIZE = 8
 
@@ -1303,7 +1303,7 @@ if not has_cache:
         train_size = len(train_op_seq)
     else:
         # Generate sequence of indices of operators in vocab
-        train_size = globals().get("GQE_TRAIN_SIZE", 128)
+        train_size = globals().get("GQE_TRAIN_SIZE", 1024)
         os.makedirs(save_dir, exist_ok=True)
 
         train_op_pool_inds = np.random.randint(op_pool_size, size=(train_size, seq_len))
