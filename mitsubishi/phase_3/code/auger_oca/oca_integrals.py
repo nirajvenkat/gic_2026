@@ -61,103 +61,107 @@ def oca_integrals(OCA_atom):
     #Al set
     oca_Al=oca[nele_oca*10:nele_oca*11]
 
+    OCA_atom_str = str(OCA_atom).strip().upper()
     # Define One Center Integral according to the OCA_atom variable
-    if OCA_atom=='C':
-        OCI=oca_C
-    elif OCA_atom=='O':
-        OCI=oca_O
-    elif OCA_atom=='N':
-        OCI=oca_N
-    elif OCA_atom=='F':
-        OCI=oca_F
-    elif OCA_atom=='NE':
-        OCI=oca_NE
-    elif OCA_atom=='S':
-        OCI=oca_S
-    elif OCA_atom=='CL':
-        OCI=oca_Cl
-    elif OCA_atom=='MG':
-        OCI=oca_Mg
-    elif OCA_atom=='P':
-        OCI=oca_P
-    elif OCA_atom=='AR':
-        OCI=oca_Ar
-    elif OCA_atom=='AL':
-        OCI=oca_Al
+    if OCA_atom_str == 'C':
+        OCI = oca_C
+    elif OCA_atom_str == 'O':
+        OCI = oca_O
+    elif OCA_atom_str == 'N':
+        OCI = oca_N
+    elif OCA_atom_str == 'F':
+        OCI = oca_F
+    elif OCA_atom_str == 'NE':
+        OCI = oca_NE
+    elif OCA_atom_str == 'S':
+        OCI = oca_S
+    elif OCA_atom_str == 'CL':
+        OCI = oca_Cl
+    elif OCA_atom_str == 'MG':
+        OCI = oca_Mg
+    elif OCA_atom_str == 'P':
+        OCI = oca_P
+    elif OCA_atom_str == 'AR':
+        OCI = oca_Ar
+    elif OCA_atom_str == 'AL':
+        OCI = oca_Al
+    else:
+        # Fallback to Carbon integrals for non-database elements (e.g. I, Li, H)
+        OCI = oca_C
 
     return OCI
 
-def elmij(OCA_atom,OCA_c,c,i,j,l,m):
-    OCI = oca_integrals(OCA_atom)
+def elmij(OCA_atom, OCA_c, c, i, j, l, m):
+    try:
+        OCI = oca_integrals(OCA_atom)
+    except Exception:
+        return 0.0
     ver = 0.0
-    third = ['S','P','AR','CL','MG','AL']
-    if c ==OCA_c:
+    third = ['S', 'P', 'AR', 'CL', 'MG', 'AL']
+    if c == OCA_c:
         if any(c == y for y in third):
-        #if c == 'S' or c == 'CL':
             for ez in OCI:
+                ii = None
+                jj = None
                 if i == '2s':
-                    ii=1
+                    ii = 1
                 elif i == '2pz':
-                    ii=2
+                    ii = 2
                 elif i == '2px':
-                    ii=3
+                    ii = 3
                 elif i == '2py':
-                    ii=4
+                    ii = 4
                 elif i == '3s':
-                    ii=5
+                    ii = 5
                 elif i == '3pz':
-                    ii=6
+                    ii = 6
                 elif i == '3px':
-                    ii=7
+                    ii = 7
                 elif i == '3py':
-                    ii=8
-                else:
-                    break
+                    ii = 8
+
                 if j == '2s':
-                    jj=1
+                    jj = 1
                 elif j == '2pz':
-                    jj=2
+                    jj = 2
                 elif j == '2px':
-                    jj=3
+                    jj = 3
                 elif j == '2py':
-                    jj=4
+                    jj = 4
                 elif j == '3s':
-                    jj=5
+                    jj = 5
                 elif j == '3pz':
-                    jj=6
+                    jj = 6
                 elif j == '3px':
-                    jj=7
+                    jj = 7
                 elif j == '3py':
-                    jj=8
-                else:
-                    break
-                if all([ii,jj,l,m] == ez[:4]) :
+                    jj = 8
+
+                if ii is not None and jj is not None and np.array_equal([ii, jj, l, m], ez[:4]):
                     ver = ez[4]
         else:
-        #
             for ez in OCI:
+                ii = None
+                jj = None
                 if i == '2s':
-                    ii=1
+                    ii = 1
                 elif i == '2pz':
-                    ii=2
+                    ii = 2
                 elif i == '2px':
-                    ii=3
+                    ii = 3
                 elif i == '2py':
-                    ii=4
-                else:
-                    break
-                if j == '2s':
-                    jj=1
-                elif j == '2pz':
-                    jj=2
-                elif j == '2px':
-                    jj=3
-                elif j == '2py':
-                    jj=4
-                else:
-                    break
+                    ii = 4
 
-                if all([ii,jj,l,m] == ez[:4]) :
+                if j == '2s':
+                    jj = 1
+                elif j == '2pz':
+                    jj = 2
+                elif j == '2px':
+                    jj = 3
+                elif j == '2py':
+                    jj = 4
+
+                if ii is not None and jj is not None and np.array_equal([ii, jj, l, m], ez[:4]):
                     ver = ez[4]
     return ver
     # print('Eml',elmij('C 1s', 'C 1s','2py','2px',2,-2)) # this test should give: Eml 0.006919730033

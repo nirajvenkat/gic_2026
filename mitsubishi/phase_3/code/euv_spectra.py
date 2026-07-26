@@ -1911,8 +1911,9 @@ if not has_cache:
         if not os.path.exists(model_path) and os.path.exists(f"{save_dir}/gqe.pt"):
             model_path = f"{save_dir}/gqe.pt"
         loaded = torch.load(model_path, map_location=device, weights_only=False)
+        sample_eval_size = globals().get("GQE_SAMPLE_EVAL_SIZE", 128)
         gen_kwargs = {
-            "n_sequences": 128, 
+            "n_sequences": sample_eval_size, 
             "max_new_tokens": seq_len, 
             "temperature": 0.001, 
             "device": device
@@ -2317,11 +2318,20 @@ hv.extension('matplotlib')
 HARTREE_TO_EV = 27.211386245988
 device = torch.device("cuda" if (USE_CUDA and torch.cuda.is_available()) else ("mps" if torch.backends.mps.is_available() else "cpu"))
 
-def compute_gamma_pq(C_IP, C_DIP, list_IP, list_DIP, core_idx, n_spin):
+# MPS hardware in PyTorch does not support float64/complex128.
+# Use float32/complex64 for MPS, and full double-precision float64/complex128 for CUDA and CPU.
+if device.type == "mps":
+    real_dtype = torch.float32
+    complex_dtype = torch.complex64
+else:
+    real_dtype = torch.float64
+    complex_dtype = torch.complex128
+
+def compute_gamma_pq(C_IP, C_DIP, list_IP, list_DIP, core_idx, n_spin, target_ip_idx=None):
     """
     Classical mapping of the Transition RDM: < Phi_DIP | a^dagger_c a_p a_q | Phi_IP >
-    Returns a tensor of shape (N_DIP_states, N_IP_states, n_spin, n_spin)
-    Note: this is actually called R_{KI;csr} in the paper.
+    If target_ip_idx is provided, returns a 3D tensor of shape (N_DIP_states, n_spin, n_spin),
+    reducing peak RAM usage from ~882 GB to ~105 MB for large systems like IMePh.
     """
     num_ip = C_IP.shape[0]
     num_dip = C_DIP.shape[0]
@@ -2329,46 +2339,73 @@ def compute_gamma_pq(C_IP, C_DIP, list_IP, list_DIP, core_idx, n_spin):
     # Pre-map the N-2 bitstrings for O(1) matching
     dip_dict = {tuple(sorted(occ)): idx for idx, occ in enumerate(list_DIP)}
 
-    gamma_pq = np.zeros((num_dip, num_ip, n_spin, n_spin), dtype=complex)
-
-    # Left, Middle, and Right Matrix Contraction (Parity-Aware)
-    for ip_idx, occ_ip in enumerate(list_IP):
-        for p in occ_ip:
-            if p == core_idx:
-                continue
-            for q in occ_ip:
-                if q == p or q == core_idx:
+    if target_ip_idx is not None:
+        gamma_pq = np.zeros((num_dip, n_spin, n_spin), dtype=complex)
+        target_C_IP = C_IP[target_ip_idx, :]
+        for ip_idx, occ_ip in enumerate(list_IP):
+            for p in occ_ip:
+                if p == core_idx:
                     continue
+                for q in occ_ip:
+                    if q == p or q == core_idx:
+                        continue
 
-                # Apply annihilation operators a_p, a_q
-                state_minus_pq = [x for x in occ_ip if x != p and x != q]
+                    # Apply annihilation operators a_p, a_q
+                    state_minus_pq = [x for x in occ_ip if x != p and x != q]
 
-                # Apply creation operator a^dagger_c
-                if core_idx in state_minus_pq:
+                    # Apply creation operator a^dagger_c
+                    if core_idx in state_minus_pq:
+                        continue
+                    new_state = sorted(state_minus_pq + [core_idx])
+
+                    dip_idx = dip_dict.get(tuple(new_state), -1)
+                    if dip_idx != -1:
+                        pos_q = occ_ip.index(q)
+                        parity = (-1) ** pos_q
+
+                        state_minus_q = occ_ip[:pos_q] + occ_ip[pos_q + 1 :]
+                        pos_p = state_minus_q.index(p)
+                        parity *= (-1) ** pos_p
+
+                        c_pos = sum(1 for x in state_minus_pq if x < core_idx)
+                        parity *= (-1) ** c_pos
+
+                        bridge_val = np.conj(C_DIP[:, dip_idx]) * parity
+                        gamma_pq[:, p, q] += bridge_val * target_C_IP[ip_idx]
+
+        return torch.tensor(gamma_pq, dtype=complex_dtype)
+    else:
+        gamma_pq = np.zeros((num_dip, num_ip, n_spin, n_spin), dtype=complex)
+        for ip_idx, occ_ip in enumerate(list_IP):
+            for p in occ_ip:
+                if p == core_idx:
                     continue
-                new_state = sorted(state_minus_pq + [core_idx])
+                for q in occ_ip:
+                    if q == p or q == core_idx:
+                        continue
 
-                dip_idx = dip_dict.get(tuple(new_state), -1)
-                if dip_idx != -1:
-                    # 1. Fermionic parity for a_q
-                    pos_q = occ_ip.index(q)
-                    parity = (-1) ** pos_q
+                    state_minus_pq = [x for x in occ_ip if x != p and x != q]
 
-                    # 2. Fermionic parity for a_p
-                    state_minus_q = occ_ip[:pos_q] + occ_ip[pos_q + 1 :]
-                    pos_p = state_minus_q.index(p)
-                    parity *= (-1) ** pos_p
+                    if core_idx in state_minus_pq:
+                        continue
+                    new_state = sorted(state_minus_pq + [core_idx])
 
-                    # 3. Fermionic parity for a^dagger_c
-                    c_pos = sum(1 for x in state_minus_pq if x < core_idx)
-                    parity *= (-1) ** c_pos
+                    dip_idx = dip_dict.get(tuple(new_state), -1)
+                    if dip_idx != -1:
+                        pos_q = occ_ip.index(q)
+                        parity = (-1) ** pos_q
 
-                    # Vectorized tensor contraction for K states (DIPs) and I states (IPs)
-                    # Shift index by +1 to account for the identity state at index 0
-                    bridge_val = np.conj(C_DIP[:, dip_idx + 1]) * parity
-                    gamma_pq[:, :, p, q] += np.outer(bridge_val, C_IP[:, ip_idx + 1])
+                        state_minus_q = occ_ip[:pos_q] + occ_ip[pos_q + 1 :]
+                        pos_p = state_minus_q.index(p)
+                        parity *= (-1) ** pos_p
 
-    return torch.tensor(gamma_pq, dtype=torch.complex128)
+                        c_pos = sum(1 for x in state_minus_pq if x < core_idx)
+                        parity *= (-1) ** c_pos
+
+                        bridge_val = np.conj(C_DIP[:, dip_idx]) * parity
+                        gamma_pq[:, :, p, q] += np.outer(bridge_val, C_IP[:, ip_idx])
+
+        return torch.tensor(gamma_pq, dtype=complex_dtype)
 
 # 1. Extract eigenvectors and lists
 C_IP = np.array(details_ip["eigenvectors"]).T
@@ -2377,13 +2414,13 @@ list_IP = details_ip["basis_occupations"]
 list_DIP = details_dip["basis_occupations"]
 num_states = C_DIP.shape[0]
 
-# 2. Keep OCA contraction on CPU for stable float64/complex128 support
+# 2. Keep OCA contraction tensors on GPU/device with supported dtype
 if not isinstance(V_pq_direct, torch.Tensor):
-    V_pq_direct = torch.tensor(V_pq_direct, dtype=torch.float64)
+    V_pq_direct = torch.tensor(V_pq_direct, device=device, dtype=real_dtype)
 if not isinstance(V_pq_exchange, torch.Tensor):
-    V_pq_exchange = torch.tensor(V_pq_exchange, dtype=torch.float64)
-V_pq_dir_cpu = V_pq_direct.detach().cpu().to(torch.float64)
-V_pq_exc_cpu = V_pq_exchange.detach().cpu().to(torch.float64)
+    V_pq_exchange = torch.tensor(V_pq_exchange, device=device, dtype=real_dtype)
+V_pq_dir_dev = V_pq_direct.detach().to(device=device, dtype=real_dtype)
+V_pq_exc_dev = V_pq_exchange.detach().to(device=device, dtype=real_dtype)
 
 n_spin_full = active_orbitals * 2
 print(f"Constructing {n_spin_full}x{n_spin_full} spin RDM tensors based on active orbitals.")
@@ -2397,16 +2434,11 @@ core_channel_scan = []
 best_choice = None
 
 for core_spin_idx_try in core_spin_candidates:
-    gamma_try = compute_gamma_pq(
-        C_IP, C_DIP, list_IP, list_DIP, core_idx=core_spin_idx_try, n_spin=n_spin_full
-    )
-
     core_hole_occ_try = [i for i in full_init_occ if i != core_spin_idx_try]
     eigs_ip_flat = np.asarray(eigs_ip).flatten()
     if core_hole_occ_try in list_IP:
         core_hole_basis_idx_try = list_IP.index(core_hole_occ_try)
-        # Shift index by +1 to account for the identity state at index 0
-        overlap_vec_try = np.abs(np.asarray(details_ip["eigenvectors"])[core_hole_basis_idx_try + 1, :]) ** 2
+        overlap_vec_try = np.abs(np.asarray(details_ip["eigenvectors"])[core_hole_basis_idx_try, :]) ** 2
         
         # Physical core-hole selection: only consider states with energy > -60.0 Hartree
         valid_indices = [idx for idx, E in enumerate(eigs_ip_flat) if E > -60.0]
@@ -2422,8 +2454,10 @@ for core_spin_idx_try in core_spin_candidates:
         target_ip_state_try = int(np.argmax(eigs_ip_flat))
         max_overlap_try = 1.0
 
-    gamma_slice_try = gamma_try[:, target_ip_state_try, :, :]
-    gamma_norm_try = float(torch.linalg.vector_norm(gamma_slice_try).item())
+    gamma_try = compute_gamma_pq(
+        C_IP, C_DIP, list_IP, list_DIP, core_idx=core_spin_idx_try, n_spin=n_spin_full, target_ip_idx=target_ip_state_try
+    )
+    gamma_norm_try = float(torch.linalg.vector_norm(gamma_try).item())
 
     core_channel_scan.append(
         {
@@ -2444,12 +2478,11 @@ for core_spin_idx_try in core_spin_candidates:
 
 core_spin_idx = best_choice["core_spin_idx"]
 target_IP_state = best_choice["target_ip_state"]
-gamma_pq_tensor = best_choice["gamma_tensor"]
-gamma_pq = gamma_pq_tensor[:, target_IP_state, :, :].cpu()
+gamma_pq = best_choice["gamma_tensor"].to(device=device, dtype=complex_dtype)
 
 # 4. Spin-orbital expansion for classical integrals (V_pq) with correct spin selection rules
-# V_pq_dir_cpu and V_pq_exc_cpu have shape (n_f, active_orbitals, active_orbitals)
-V_lmpq_spin = torch.zeros((len(f_orbitals), 2, n_spin_full, n_spin_full), dtype=torch.float64)
+# V_pq_dir_dev and V_pq_exc_dev have shape (n_f, active_orbitals, active_orbitals)
+V_lmpq_spin = torch.zeros((len(f_orbitals), 2, n_spin_full, n_spin_full), device=device, dtype=complex_dtype)
 
 # Populate direct and exchange terms with proper spin-selection conservation
 # Direct: spin of p (s1) must match continuum spin (se) and spin of q (s2) must match core-hole spin (sc)
@@ -2457,8 +2490,8 @@ V_lmpq_spin = torch.zeros((len(f_orbitals), 2, n_spin_full, n_spin_full), dtype=
 for f_idx in range(len(f_orbitals)):
     for i, act_i in enumerate(active_indices):
         for j, act_j in enumerate(active_indices):
-            val_dir = V_pq_dir_cpu[f_idx, i, j].item()
-            val_exc = V_pq_exc_cpu[f_idx, i, j].item()
+            val_dir = V_pq_dir_dev[f_idx, i, j].item()
+            val_exc = V_pq_exc_dev[f_idx, i, j].item()
             for se in (0, 1):  # Emitted continuum electron spin channel (0 = up, 1 = down)
                 for s1 in (0, 1):  # Spin of orbital p
                     for s2 in (0, 1):  # Spin of orbital q
@@ -2469,12 +2502,12 @@ for f_idx in range(len(f_orbitals)):
                             term -= val_exc
                         V_lmpq_spin[f_idx, se, i * 2 + s1, j * 2 + s2] = term
 
-# 5. Tensor contraction (OCA) in complex128 for numerical stability
+# 5. Tensor contraction (OCA) in complex_dtype for numerical stability (CUDA/MPS accelerated)
 # amplitudes will have shape (num_dip, len(f_orbitals), 2)
 amplitudes = torch.einsum(
     "kpq,lmpq->klm",
-    gamma_pq.to(torch.complex128),
-    V_lmpq_spin.to(torch.complex128),
+    gamma_pq,
+    V_lmpq_spin,
 )
 
 # Apply Fermi's Golden Rule

@@ -96,6 +96,7 @@ def _build_pyscf_molecular_integrals(
     geometry,
     basis: str,
     charge: int,
+    mult: int = 1,
     active_electrons: int,
     active_orbitals: int,
     use_orbital_prep: bool = False,
@@ -110,6 +111,7 @@ def _build_pyscf_molecular_integrals(
         geometry_key=geometry_key,
         basis=str(basis),
         charge=int(charge),
+        mult=int(mult),
         active_electrons=int(active_electrons),
         active_orbitals=int(active_orbitals),
         use_orbital_prep=use_orbital_prep,
@@ -126,6 +128,7 @@ def _build_pyscf_molecular_integrals_ecp(
     symbols_key: tuple[str, ...],
     geometry_key: tuple[float, ...],
     charge: int,
+    mult: int = 1,
     active_electrons: int,
     active_orbitals: int,
 ):
@@ -151,11 +154,11 @@ def _build_pyscf_molecular_integrals_ecp(
     mol.basis = basis_map
     mol.ecp = ecp_map
     mol.charge = charge
-    mol.spin = 0
+    mol.spin = int(mult) - 1
     mol.build(verbose=0)
 
     # 2. Run Hartree-Fock
-    mf = scf.RHF(mol)
+    mf = scf.ROHF(mol) if mult > 1 else scf.RHF(mol)
     mf.kernel()
 
     # 3. Extract molecular orbital coefficients and raw integrals
@@ -204,6 +207,7 @@ def _build_pyscf_molecular_integrals_cached(
     geometry_key: tuple[float, ...],
     basis: str,
     charge: int,
+    mult: int = 1,
     active_electrons: int,
     active_orbitals: int,
     use_orbital_prep: bool = False,
@@ -216,6 +220,7 @@ def _build_pyscf_molecular_integrals_cached(
             symbols_key=symbols_key,
             geometry_key=geometry_key,
             charge=charge,
+            mult=mult,
             active_electrons=active_electrons,
             active_orbitals=active_orbitals,
         )
@@ -226,11 +231,31 @@ def _build_pyscf_molecular_integrals_cached(
             list(symbols_key),
             coordinates,
             charge=charge,
-            mult=1,
+            mult=mult,
             basis=basis,
             active_electrons=active_electrons,
             active_orbitals=active_orbitals,
         )
+
+    if active_orbitals is not None and one_mo.shape[0] > active_orbitals:
+        import pennylane as qml
+        mol_nao = one_mo.shape[0]
+        core, active = qml.qchem.active_space(
+            active_electrons, mol_nao, mult, active_electrons, active_orbitals
+        )
+        if active:
+            if core:
+                for i in core:
+                    core_constant = core_constant + 2 * one_mo[i][i]
+                    for j in core:
+                        core_constant = core_constant + 2 * two_mo[i][j][j][i] - two_mo[i][j][i][j]
+                for p in active:
+                    for q in active:
+                        for i in core:
+                            one_mo[p, q] = one_mo[p, q] + (2 * two_mo[i][p][q][i] - two_mo[i][p][i][q])
+            one_mo = one_mo[np.ix_(active, active)]
+            two_mo = two_mo[np.ix_(active, active, active, active)]
+
     return (
         np.asarray(core_constant, dtype=float),
         np.asarray(one_mo, dtype=float),
@@ -277,6 +302,7 @@ def _build_exact_fermion_operator(
     geometry,
     basis: str,
     charge: int,
+    mult: int = 1,
     active_electrons: int,
     active_orbitals: int,
     use_orbital_prep: bool = False,
@@ -295,6 +321,7 @@ def _build_exact_fermion_operator(
         geometry=geometry,
         basis=basis,
         charge=charge,
+        mult=mult,
         active_electrons=active_electrons,
         active_orbitals=active_orbitals,
         use_orbital_prep=use_orbital_prep,
@@ -314,6 +341,7 @@ def _build_brg_fermion_operator(
     geometry,
     basis: str,
     charge: int,
+    mult: int = 1,
     active_electrons: int,
     active_orbitals: int,
     brg_tolerance: float,
@@ -335,6 +363,7 @@ def _build_brg_fermion_operator(
         geometry=geometry,
         basis=basis,
         charge=charge,
+        mult=mult,
         active_electrons=active_electrons,
         active_orbitals=active_orbitals,
         use_orbital_prep=use_orbital_prep,
@@ -382,6 +411,7 @@ def _build_brg_hamiltonian_dense(
     geometry,
     basis: str,
     charge: int,
+    mult: int = 1,
     active_electrons: int,
     active_orbitals: int,
     brg_tolerance: float,
@@ -399,6 +429,7 @@ def _build_brg_hamiltonian_dense(
         geometry=geometry,
         basis=basis,
         charge=charge,
+        mult=mult,
         active_electrons=active_electrons,
         active_orbitals=active_orbitals,
         brg_tolerance=brg_tolerance,
@@ -875,6 +906,8 @@ def qscEOM(
                 resolved_projector_backend = "sparse_number_preserving"
         else:
             resolved_projector_backend = "dense"
+    else:
+        resolved_projector_backend = projector_backend
 
     H = None
     qubits = 2 * int(active_orbitals)
@@ -887,6 +920,7 @@ def qscEOM(
                 geometry=geometry,
                 basis=basis,
                 charge=charge,
+                mult=mult,
                 active_electrons=active_electrons,
                 active_orbitals=active_orbitals,
                 use_orbital_prep=True,
@@ -916,7 +950,10 @@ def qscEOM(
         if pauli_grouping and H is not None and hasattr(H, "compute_grouping"):
             H.compute_grouping(grouping_type=grouping_type)
 
-    hf_state = qml.qchem.hf_state(active_electrons, qubits)
+    if active_electrons == 0:
+        hf_state = np.zeros(qubits, dtype=int)
+    else:
+        hf_state = qml.qchem.hf_state(active_electrons, qubits)
     ref_occ = [int(i) for i, bit in enumerate(np.asarray(hf_state, dtype=int)) if int(bit) == 1]
     list1 = [list(int(v) for v in occ) for occ in inite(ref_occ, qubits)]
     basis_occupations_returned = [list(int(v) for v in occ) for occ in list1]
@@ -940,6 +977,8 @@ def qscEOM(
             continue
         seen_occ.add(key)
         list1.append(list(key))
+
+    basis_occupations_returned = [list(int(v) for v in occ) for occ in list1]
 
     if len(list1) == 0:
         raise ValueError("qscEOM basis is empty after include_identity filtering.")
@@ -1044,53 +1083,13 @@ def qscEOM(
     # ADAPT state is included in the subspace).
     if shots == 0:
         if resolved_projector_backend == "sparse_number_preserving":
-            sector_indices = np.asarray(_jw_number_sector_indices(int(active_electrons), int(qubits)), dtype=int)
-        else:
-            sector_indices = None
-
-        state_map = {}
-        try:
-            from tqdm.auto import tqdm
-            pbar = tqdm(total=n_states, desc=f"qscEOM Basis States ({active_electrons}e, {active_orbitals}o)", unit="state")
-        except ImportError:
-            pbar = None
-
-        local_dev = _make_device(device_name, qubits)
-        circuit_state_local = _build_circuit_state(local_dev)
-        for idx in range(n_states):
-            vec = np.asarray(
-                circuit_state_local(
-                    params,
-                    list1[idx],
-                    null_state,
-                    ash_excitation,
-                ),
-                dtype=np.complex64,
-            )
-            if sector_indices is not None:
-                vec = vec[sector_indices]
-            state_map[idx] = vec
-            if pbar is not None:
-                pbar.update(1)
-
-        if pbar is not None:
-            pbar.close()
-
-        if sector_indices is not None:
-            restricted_basis_states = np.column_stack([state_map[i] for i in range(n_states)])
-            basis_states = None
-        else:
-            basis_states = np.column_stack([state_map[i] for i in range(n_states)])
-            restricted_basis_states = None
-        del state_map
-
-        if resolved_projector_backend == "sparse_number_preserving":
             if brg_tolerance is not None:
                 fermion_operator, sparse_brg_details = _build_brg_fermion_operator(
                     symbols=symbols,
                     geometry=geometry,
                     basis=basis,
                     charge=charge,
+                    mult=mult,
                     active_electrons=active_electrons,
                     active_orbitals=active_orbitals,
                     brg_tolerance=float(brg_tolerance),
@@ -1103,6 +1102,7 @@ def qscEOM(
                     geometry=geometry,
                     basis=basis,
                     charge=charge,
+                    mult=mult,
                     active_electrons=active_electrons,
                     active_orbitals=active_orbitals,
                     use_orbital_prep=use_orbital_prep,
@@ -1113,14 +1113,14 @@ def qscEOM(
                 qubits=qubits,
                 active_electrons=active_electrons,
             )
-            if restricted_basis_states is None:
-                restricted_basis_states, _sector_indices = _restrict_basis_states_to_number_sector(
-                    basis_states,
-                    active_electrons=active_electrons,
-                    qubits=qubits,
-                )
             brg_details.update(sparse_details)
-            M_exact = restricted_basis_states.conj().T @ (sparse_hamiltonian @ restricted_basis_states)
+
+            sector_indices = np.asarray(_jw_number_sector_indices(int(active_electrons), int(qubits)), dtype=int)
+            pos_map = {val: pos for pos, val in enumerate(sector_indices)}
+            det_positions = np.array(
+                [pos_map[sum(1 << (qubits - 1 - int(orb)) for orb in occ)] for occ in list1],
+                dtype=int,
+            )
         else:
             if brg_tolerance is not None:
                 H_dense, dense_brg_details = _build_brg_hamiltonian_dense(
@@ -1128,14 +1128,70 @@ def qscEOM(
                     geometry=geometry,
                     basis=basis,
                     charge=charge,
+                    mult=mult,
                     active_electrons=active_electrons,
                     active_orbitals=active_orbitals,
                     brg_tolerance=float(brg_tolerance),
+                    use_orbital_prep=use_orbital_prep,
                 )
                 brg_details.update(dense_brg_details)
             else:
                 H_dense = np.asarray(qml.matrix(H, wire_order=range(qubits)), dtype=complex)
-            M_exact = basis_states.conj().T @ (H_dense @ basis_states)
+
+            sector_indices = None
+            det_positions = np.array(
+                [sum(1 << (qubits - 1 - int(orb)) for orb in occ) for occ in list1],
+                dtype=int,
+            )
+
+        local_dev = _make_device(device_name, qubits)
+
+        @qml.qnode(local_dev)
+        def forward_circuit(occ):
+            for w in occ:
+                qml.X(wires=w)
+            for i, excitations in enumerate(ash_excitation):
+                _apply_excitation_gate(qml, excitations, params[i], ansatz_type)
+            return qml.state()
+
+        @qml.qnode(local_dev)
+        def backward_circuit(state_in):
+            qml.StatePrep(state_in, wires=range(qubits))
+            for i in reversed(range(len(ash_excitation))):
+                _apply_excitation_gate(qml, ash_excitation[i], -params[i], ansatz_type)
+            return qml.state()
+
+        M_exact = np.zeros((n_states, n_states), dtype=np.complex64)
+
+        try:
+            from tqdm.auto import tqdm
+            pbar = tqdm(total=n_states, desc=f"qscEOM Streamed Matrix ({active_electrons}e, {active_orbitals}o)", unit="state")
+        except ImportError:
+            pbar = None
+
+        if resolved_projector_backend == "sparse_number_preserving":
+            w_j_full = np.zeros(2**qubits, dtype=np.complex64)
+            for j in range(n_states):
+                psi_j_sector = np.asarray(forward_circuit(list1[j]), dtype=np.complex64)[sector_indices]
+                w_j_sector = sparse_hamiltonian @ psi_j_sector
+                w_j_full.fill(0)
+                w_j_full[sector_indices] = w_j_sector
+                v_j_sector = np.asarray(backward_circuit(w_j_full), dtype=np.complex64)[sector_indices]
+                M_exact[:, j] = v_j_sector[det_positions]
+                if pbar is not None:
+                    pbar.update(1)
+        else:
+            for j in range(n_states):
+                psi_j = np.asarray(forward_circuit(list1[j]), dtype=np.complex64)
+                w_j = H_dense @ psi_j
+                v_j = np.asarray(backward_circuit(w_j), dtype=np.complex64)
+                M_exact[:, j] = v_j[det_positions]
+                if pbar is not None:
+                    pbar.update(1)
+
+        if pbar is not None:
+            pbar.close()
+
         M_exact = 0.5 * (M_exact + M_exact.conj().T)
         eigvals, eigvecs = np.linalg.eigh(M_exact)
         order = np.argsort(np.real(eigvals))
@@ -1146,7 +1202,6 @@ def qscEOM(
             return values
         details = {
             "projected_matrix": np.asarray(M_exact, dtype=complex),
-            "basis_states": np.asarray(basis_states, dtype=complex),
             "eigenvectors": eigvecs_sorted,
             "basis_occupations": basis_occupations_returned,
         }
