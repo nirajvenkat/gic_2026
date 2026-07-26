@@ -6,8 +6,7 @@ This guide provides instructions for compiling the **Defining Point Algorithm (D
 
 ## 1. Overview & Architecture Difference
 
-- **Pre-compiled macOS Binary:** The default `dpa-main` file located in `doe/phase_3/code/dpa-main` is compiled for macOS (`Mach-O 64-bit arm64`).
-- **Linux Execution (qBraid):** Linux requires an ELF 64-bit binary (`ELF 64-bit LSB executable x86-64`). Running the macOS binary directly on qBraid will result in an `Exec format error` or `cannot execute binary file`.
+- **Pre-compiled Binary Required:** The `dpa-main` binary must be located in `doe/phase_3/code` to compare hybrid quantum-classical pipelines against exact MILP benchmarks with provable convergence guarantees.
 - **Source Code Location:** The C++ source files, headers, and Makefile are located at:
   ```text
   doe/external/code/dpa/
