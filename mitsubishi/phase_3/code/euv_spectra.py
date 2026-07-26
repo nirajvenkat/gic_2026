@@ -28,7 +28,7 @@
 # # Quantum Chemistry for Spectroscopy in EUV Lithography
 # **Team Name:** Entangled Trio
 #
-# This notebook demonstrates the calculation of $\rm H_2O$ spectra:
+# This notebook demonstrates quantum algorithms for molecular spectroscopy:
 # - **Photoabsorption Spectrum**: Using the time-domain Green's function propagated via a second-order Trotter product formula on a Compressed Double-Factorized (CDF) Hamiltonian, based on the work by [Kharazi et al.](https://arxiv.org/abs/2602.20234)
 # - **Auger Electron Spectrum**: Using the Generative Quantum Eigensolver (GQE) combined with the Quantum Self-Consistent Equation-of-Motion (q-sc-EOM) and One-Center Approximation (OCA), based on the work by [Keithley et al.](https://arxiv.org/abs/2603.12859)
 #
@@ -71,7 +71,7 @@ current_file_dir = get_current_file_dir()
 # ## Parameter Settings
 #
 # Configure the execution parameters for the simulation:
-#
+# * **`target_molecule`**: The molecule to simulate. Options: `"H2O"` (water, our most tested), `LiH`,`"IMePh"` (4-(iodomethyl)phenol).
 # * **`HARDWARE_TARGET`**: Target hardware execution platform. Options: `"Mac"` (local Apple Silicon Mac), `"H100"` (8x NVIDIA H100 GPU cluster), or `"B200"` (8x NVIDIA B200 GPU cluster). Automatically manages `USE_CUDA` and active-space qubit allocations.
 # * **`USE_DIT`**: If `True`, enable Diffusion Transformer (DIT) for GQE training as an alternative to the auto-regressive GPTnano.
 # * **`USE_ORBITAL_PREP`**: If `True`, apply pre-quantum classical orbital and integral preprocessing (ECP, AVAS, CVS) for heavy atoms to reduce/separate the molecular space before qubit mapping.
@@ -588,11 +588,9 @@ def generate_molecule_data(molecule_name="H2", source="qchem", local_dataset_pat
 # %% [markdown]
 # ## Loading and Configuring Molecular Parameters
 #
-# For comparison, we load:
-# 1. $\rm H_2O$ via PL datasets (qchem)
-# 2. $\rm H_2O$ from PubChem
+# For our target molecule, we load it from the qchem/pubchem dataset to extract and compare coordinates, Hamiltonian terms, Hartree-Fock reference states, and the full operator pools of single and double excitations.
 #
-# This allows us to extract and compare coordinates, Hamiltonian terms, Hartree-Fock reference states, and the full operator pools of single and double excitations. Note that we will proceed with choice 1 ($\rm H_2O$ via qchem) for the rest of the notebook.
+# We then perform classical preprocessing on the orbitals (ECP and AVAS), and on the Hamiltonian terms (CDF, with BLISS if enabled). 
 
 # %%
 # target_molecule configured at the top of parameters block
@@ -1644,6 +1642,7 @@ if not has_cache:
         gpt.train()
         num_iters = globals().get("GQE_NUM_ITERS", 10000)
         eval_freq = globals().get("GQE_EVAL_FREQ", 2500)
+        train_seq_size = globals().get("GQE_TRAINING_SEQ_SIZE", 128)
         for i in tqdm(range(num_iters), desc="Training"):
             # Shuffle batches of the training set
             np.random.shuffle(train_inds)
@@ -1664,7 +1663,7 @@ if not has_cache:
                 # For GPT evaluation
                 gpt.eval()
                 gen_kwargs = {
-                    "n_sequences": 16, 
+                    "n_sequences": train_seq_size, 
                     "max_new_tokens": seq_len, 
                     "temperature": 0.001, 
                     "device": device
