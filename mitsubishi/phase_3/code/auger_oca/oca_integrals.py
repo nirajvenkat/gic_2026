@@ -91,6 +91,13 @@ def oca_integrals(OCA_atom):
 
     return OCI
 
+def _norm_center(label):
+    parts = str(label).strip().split()
+    if not parts:
+        return str(label)
+    atom_symbol = "".join(ch for ch in parts[0] if not ch.isdigit()).upper()
+    return f"{atom_symbol} {' '.join(parts[1:])}"
+
 def elmij(OCA_atom, OCA_c, c, i, j, l, m):
     try:
         OCI = oca_integrals(OCA_atom)
@@ -98,7 +105,7 @@ def elmij(OCA_atom, OCA_c, c, i, j, l, m):
         return 0.0
     ver = 0.0
     third = ['S', 'P', 'AR', 'CL', 'MG', 'AL']
-    if c == OCA_c:
+    if _norm_center(c) == _norm_center(OCA_c):
         if any(c == y for y in third):
             for ez in OCI:
                 ii = None

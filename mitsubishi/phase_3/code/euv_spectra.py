@@ -2776,16 +2776,10 @@ if not classical_peaks:
             E_kinetics_ev = (E_IP - E_DIPs) * HARTREE_TO_EV
             
             sys.path.insert(0, get_current_file_dir())
-            # Monkey patch elmij in auger_oca to resolve gc == OCA_c mismatch bug
             import auger_oca.oca_integrals
             import auger_oca.rt2mzz
             from functools import lru_cache
             auger_oca.oca_integrals.oca_integrals = lru_cache(maxsize=32)(auger_oca.oca_integrals.oca_integrals)
-            orig_elmij = auger_oca.oca_integrals.elmij
-            def patched_elmij(OCA_atom, OCA_c, c, i, j, l, m):
-                return orig_elmij(OCA_atom, OCA_c, OCA_c, i, j, l, m)
-            auger_oca.oca_integrals.elmij = patched_elmij
-            auger_oca.rt2mzz.elmij = patched_elmij
             
             from auger_oca.initi import init2, init3
             from auger_oca.auger_driver import driver_auger
@@ -2884,7 +2878,10 @@ ax.set_xlabel("Kinetic Energy (eV)")
 ax.set_ylabel("Normalized Intensity")
 ax.legend(loc="upper left")
 
-ax.set_xlim(400, 575)
+if "I" in symbols:
+    ax.set_xlim(400, 575)
+else:
+    ax.set_xlim(float(x_energies.min()), float(x_energies.max()))
 fig.tight_layout()
 
 display(fig)

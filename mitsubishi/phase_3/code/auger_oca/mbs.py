@@ -24,35 +24,30 @@ def shell_basis(lista,comtbasoff,nbasf,nbasft,nmo):
     MBS_excl=['2s','2px','2py','2pz','3s','3px','3py','3pz']
     func2row=['1s','2s','2px','2py','2pz']
     func3row=['1s','2s','2px','2py','2pz','3s','3px','3py','3pz']
-    third = ['S','P','AR','CL','MG','AL']
-    second= ['O','C','N','F','H','NE']
-    nik=0
+    third = ['S', 'P', 'AR', 'CL', 'MG', 'AL']
+    second = ['O', 'C', 'N', 'F', 'H', 'NE', 'LI', 'I']
+    nik = 0
     for e in lista:
-        g=e.split()
-        ndgt=g[0]
-        result = ''.join(i for i in ndgt if not i.isdigit())
+        g = e.split()
+        ndgt = g[0]
+        result = ''.join(i for i in ndgt if not i.isdigit()).upper()
         if any(result == y for y in third):
-            if g[1] in func3row :
-                #index_e.append(lista.index(e)+1)
-                index_e.append(nik+1)
-        elif any(result == y for y in second): 
-            if g[1] in func2row :
-                #index_e.append(lista.index(e)+1)
-                index_e.append(nik+1)
+            if g[1] in func3row:
+                index_e.append(nik + 1)
         else:
-            print('Element',result,'not supported.')
-            break
-        nik=nik+1
+            if g[1] in func2row:
+                index_e.append(nik + 1)
+        nik = nik + 1
 
     # now check for H 2s 2p functions
-    hydro=list() # this collect indexes of 2s 2p of H functions
+    hydro = list()  # this collects indexes of 2s 2p of H functions
     for ij in index_e:
-        i=ij-1
-        ind_dummy=lista[i].split()
-        if ind_dummy[0][0] == 'H':
+        i = ij - 1
+        ind_dummy = lista[i].split()
+        if ind_dummy[0].upper().startswith('H'):
             if ind_dummy[1] in MBS_excl:
                 hydro.append(ij)
-    index_eh=[x for x in index_e if x not in hydro] # elements of index_e minus hydro
+    index_eh = [x for x in index_e if x not in hydro]  # elements of index_e minus hydro
 
     shell= list()
     scr= list()

@@ -20,6 +20,13 @@ from numpy import linalg as LA
 # rt2mzz.py
 # --------------------------------------------------------------------------------------
 
+def _norm_center(label):
+    parts = str(label).strip().split()
+    if not parts:
+        return str(label)
+    atom_symbol = "".join(c for c in parts[0] if not c.isdigit()).upper()
+    return f"{atom_symbol} {' '.join(parts[1:])}"
+
 def rt2mzz(OCA_c,OCA_atom,cmoa,cmob,d_sza,d_szb,tdmab,totalSymmetry,symmetry,\
            nmo,nbasf,nbasft,comtbasoff,cmotab,comtaboff,basis_id_hd5,element):
     from .symm import mul,norb,nbasis
@@ -35,6 +42,8 @@ def rt2mzz(OCA_c,OCA_atom,cmoa,cmob,d_sza,d_szb,tdmab,totalSymmetry,symmetry,\
     # ELM (L,M) contains 9 elements: { [0,0]; [1,-1]; [1,0]; [1,1]; [2,-2]; [2,-1]; [2,0]; [2,1]; [2,2] }
     ELM=list(0 for ij in range(9))    
     Auger_width=0.0
+
+    norm_OCA_c = _norm_center(OCA_c)
 
     atombasis_list,shell_basis_sz,shell_py = basis_list_for_oca(basis_id_hd5,nbasft,element,comtbasoff,nbasf,nmo)
     sz_nbasf,sznbasft,ncsz,nbasz,nszorb,nbaszoff,nszoff,ncszoff,norbsztaboff = init_sz(symmetry,nbasf,shell_py,nmo)
@@ -95,20 +104,18 @@ def rt2mzz(OCA_c,OCA_atom,cmoa,cmob,d_sza,d_szb,tdmab,totalSymmetry,symmetry,\
                             #print('# Frobenius norm of TDMZZ on orb.',izz+1,':',LA.norm(tdmzz_symm[izz],'fro'))
                             totfrob=totfrob+(LA.norm(tdmzz_symm[izz],'fro'))
                             # first element must be the core
-                            if atombasis_list[izz+nszoff[i]] == OCA_c :
+                            if _norm_center(atombasis_list[izz+nszoff[i]]) == norm_OCA_c :
                                 print("# symmetry:",isym,jsym,lsym)
-                                #for jzz in fjzz:
-                                    #for lzz in flzz:
-                                #Accumulate the integral ELM
-                                #print('Elm_ij',tdmzz_symm[izz][jzz][lzz])
                                 for ll in range(3): # L=0,1,2 
                                     for mm in range(-ll,ll+1): # M = -L,L
                                         for jzz in fjzz:
                                             for lzz in flzz:
-                                                if atombasis_list[jzz+nszoff[j]][:2]==OCA_c[:2] and atombasis_list[lzz+nszoff[l]][:2]==OCA_c[:2]:
+                                                norm_j = _norm_center(atombasis_list[jzz+nszoff[j]])
+                                                norm_l = _norm_center(atombasis_list[lzz+nszoff[l]])
+                                                if norm_j.split()[0] == norm_OCA_c.split()[0] and norm_l.split()[0] == norm_OCA_c.split()[0]:
                                                     gc=atombasis_list[izz+nszoff[i]]
-                                                    gi=atombasis_list[jzz+nszoff[j]][2:].replace(" ","")
-                                                    gj=atombasis_list[lzz+nszoff[l]][2:].replace(" ","")
+                                                    gi=atombasis_list[jzz+nszoff[j]].split()[-1]
+                                                    gj=atombasis_list[lzz+nszoff[l]].split()[-1]
                                                     if ll==0 and mm==0:
                                                         ELM[0] = ELM[0] + tdmzz_symm[izz][jzz][lzz]*elmij(OCA_atom,OCA_c,gc,gi,gj,ll,mm)
                                                     if ll==1 and mm==-1:
@@ -127,7 +134,6 @@ def rt2mzz(OCA_c,OCA_atom,cmoa,cmob,d_sza,d_szb,tdmab,totalSymmetry,symmetry,\
                                                         ELM[7] = ELM[7] + tdmzz_symm[izz][jzz][lzz]*elmij(OCA_atom,OCA_c,gc,gi,gj,ll,mm)
                                                     if ll==2 and mm==2:
                                                         ELM[8] = ELM[8] + tdmzz_symm[izz][jzz][lzz]*elmij(OCA_atom,OCA_c,gc,gi,gj,ll,mm)
-                                                    #ELM = ELM + tdmzz_symm[izz][jzz][lzz]*elmij(gc,gi,gj,ll,mm)
                                                     if abs(elmij(OCA_atom,OCA_c,gc,gi,gj,ll,mm) )>10e-9:
                                                         print(gc,',',atombasis_list[jzz+nszoff[j]],',',atombasis_list[lzz+nszoff[l]],',',\
                                                             "%.12E" % tdmzz_symm[izz][jzz][lzz],';','elm(',ll,mm,')',':',elmij(OCA_atom,OCA_c,gc,gi,gj,ll,mm) )
