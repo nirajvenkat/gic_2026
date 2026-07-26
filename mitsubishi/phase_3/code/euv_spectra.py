@@ -1962,11 +1962,6 @@ if not has_cache:
     os.makedirs(datasets_pyscf_dir, exist_ok=True)
 
     # 4. Run qscEOM to compute the energies (IP and DIP spaces)
-    import importlib
-    import qsceom
-    importlib.reload(qsceom)
-    from qsceom import qscEOM
-
     device_name_qsceom = "lightning.gpu" if USE_CUDA else "lightning.qubit"
 
     # Run 1: IP space (Core-hole state, N-1 electrons)
