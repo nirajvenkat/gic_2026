@@ -2,6 +2,7 @@
 
 [<img src="https://qbraid-static.s3.amazonaws.com/logos/Launch_on_qBraid_black.png" width="150">](https://account.qbraid.com?gitHubUrl=https://github.com/nirajvenkat/gic_2026.git&envSlug=etrio_fjqdnq)
 
+**[Link to Repository](https://github.com/nirajvenkat/gic_2026.git)**
 
 ## Write-ups
 

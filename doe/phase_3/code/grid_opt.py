@@ -126,7 +126,6 @@ MAX_THREADS = 0 # Setting to 0 will use all available CPU cores for multi-core p
 USE_SAMPLOMATIC = False
 USE_NOISE = False
 SAMPLOMATIC_METHODS = []
-FORCE_RERUN = False  # Set to False to quickly load pre-computed results in ./data/ and ./data_benders/ without re-running simulation
 
 if USE_SAMPLOMATIC and not USE_QPU and not USE_NOISE:
     print("⚠️ WARNING: USE_SAMPLOMATIC is True, but the simulation is NOISELESS (USE_QPU=False, USE_NOISE=False). "
@@ -1028,7 +1027,6 @@ from IPython.display import display
 import numpy as np
 
 # Visualization options
-INTERACTIVE_PLOT = True  # Set to False to render a static, HTML-exportable plot of the best compromise solution
 USE_BENDERS = True       # Set to True to render Benders-QAMOO Pareto front, False for native QAMOO
 
 try:
@@ -1039,13 +1037,13 @@ try:
     # Load the quantum non-dominated solutions
     nd_positions = np.load(target_config.results_folder + 'non_dominated_positions.npy')
     all_samples = np.load(target_config.results_folder + 'samples.npy')
-    
+
     if len(nd_positions) > 0:
         # 1. Create rustworkx graph natively
         rx_graph = rx.PyGraph()
         rx_graph.add_nodes_from(range(num_buses))
         rx_graph.add_edges_from_no_data([(u, v) for u, v in edges])
-        
+
         # Calculate static layout coordinates
         pos_dict = rx.spring_layout(rx_graph, seed=42)
         q_pts = np.load(target_config.results_folder + 'non_dominated_samples.npy')
@@ -1061,11 +1059,11 @@ try:
         def get_plot_figure(sol_idx):
             best_config = all_samples[nd_positions[sol_idx]]
             obj_vals = q_pts[sol_idx]
-            
+
             placed_x, placed_y, placed_text = [], [], []
             standard_x, standard_y, standard_text = [], [], []
             nc_x, nc_y, nc_text = [], [], []
-            
+
             for bus in range(num_buses):
                 x, y = pos_dict[bus]
                 if bus in pruned_buses:
@@ -1156,80 +1154,80 @@ try:
             )
             return fig
 
-        if INTERACTIVE_PLOT:
-            # We construct a FigureWidget and bind it to the slider
-            fig = go.FigureWidget(get_plot_figure(len(nd_positions) // 2))
-            
-            def update_plot_data(sol_idx):
-                best_config = all_samples[nd_positions[sol_idx]]
-                obj_vals = q_pts[sol_idx]
-                
-                placed_x, placed_y = [], []
-                standard_x, standard_y = [], []
-                nc_x, nc_y = [], []
-                
-                for bus in range(num_buses):
-                    x, y = pos_dict[bus]
-                    if bus in pruned_buses:
-                        idx = pruned_buses.index(bus)
-                        if best_config[idx] == 1:
-                            placed_x.append(x)
-                            placed_y.append(y)
-                        else:
-                            standard_x.append(x)
-                            standard_y.append(y)
-                    else:
-                        nc_x.append(x)
-                        nc_y.append(y)
-                
-                with fig.batch_update():
-                    fig.data[1].x = placed_x
-                    fig.data[1].y = placed_y
-                    fig.data[2].x = standard_x
-                    fig.data[2].y = standard_y
-                    fig.data[3].x = nc_x
-                    fig.data[3].y = nc_y
-                    fig.layout.title.text = (
-                        f'Siting Plan ({method_name} - Solution {sol_idx+1}/{len(nd_positions)})<br>'
-                        f'Voltage Dev: {obj_vals[0]:.4f} | Cost: {obj_vals[1]:.4f} | Reliability: {obj_vals[2]:.4f}'
-                    )
-
-            slider = widgets.IntSlider(
-                min=0, max=len(nd_positions)-1, step=1, 
-                value=len(nd_positions)//2, 
-                description='Pareto Index'
-            )
-            
-            def on_slider_change(change):
-                update_plot_data(change['new'])
-                    
-            slider.observe(on_slider_change, names='value')
-            layout_box = widgets.VBox([slider, fig])
-            display(layout_box)
+        # ── Static: best-compromise solution with all overlays visible ─────────
+        if len(nd_positions) > 1:
+            ideal = q_pts.min(axis=0)
+            nadir = q_pts.max(axis=0)
+            ranges = nadir - ideal
+            ranges[ranges == 0] = 1e-6
+            norm_pts = (q_pts - ideal) / ranges
+            best_sol_idx = int(np.argmin(np.linalg.norm(norm_pts, axis=1)))
         else:
-            # Render the best compromise solution on the quantum Pareto front
-            # We select the compromise solution that minimizes the normalized L2 distance to the ideal point.
-            if len(nd_positions) > 1:
-                # Find ideal point (min values in each objective)
-                ideal = q_pts.min(axis=0)
-                nadir = q_pts.max(axis=0)
-                ranges = nadir - ideal
-                ranges[ranges == 0] = 1e-6
-                
-                # Compute L2 distance from normalized objectives to ideal (0)
-                norm_pts = (q_pts - ideal) / ranges
-                best_sol_idx = int(np.argmin(np.linalg.norm(norm_pts, axis=1)))
-            else:
-                best_sol_idx = 0
-                
-            fig = get_plot_figure(best_sol_idx)
-            fig.layout.title.text += "<br><b>Best Compromise Solution (L2 ideal-compromise on Pareto front)</b>"
-            fig.show()
-            
+            best_sol_idx = 0
+
+        fig_static = get_plot_figure(best_sol_idx)
+        fig_static.update_traces(visible=True)  # Force all legend overlays on
+        fig_static.layout.title.text += "<br><b>Best Compromise Solution (L2 ideal-compromise on Pareto front)</b>"
+        fig_static.show()
+
     else:
         print("No non-dominated solutions found to visualize.")
 except Exception as e:
-    print(f"Could not render visualization. Error: {e}")
+    print(f"Could not render static visualization. Error: {e}")
+
+# %%
+try:
+    # ── Interactive: slider over all Pareto solutions ────────────────────────────
+    fig_widget = go.FigureWidget(get_plot_figure(len(nd_positions) // 2))
+
+    def update_plot_data(sol_idx):
+        best_config = all_samples[nd_positions[sol_idx]]
+        obj_vals = q_pts[sol_idx]
+
+        placed_x, placed_y = [], []
+        standard_x, standard_y = [], []
+        nc_x, nc_y = [], []
+
+        for bus in range(num_buses):
+            x, y = pos_dict[bus]
+            if bus in pruned_buses:
+                idx = pruned_buses.index(bus)
+                if best_config[idx] == 1:
+                    placed_x.append(x)
+                    placed_y.append(y)
+                else:
+                    standard_x.append(x)
+                    standard_y.append(y)
+            else:
+                nc_x.append(x)
+                nc_y.append(y)
+
+        with fig_widget.batch_update():
+            fig_widget.data[1].x = placed_x
+            fig_widget.data[1].y = placed_y
+            fig_widget.data[2].x = standard_x
+            fig_widget.data[2].y = standard_y
+            fig_widget.data[3].x = nc_x
+            fig_widget.data[3].y = nc_y
+            fig_widget.layout.title.text = (
+                f'Siting Plan ({method_name} - Solution {sol_idx+1}/{len(nd_positions)})<br>'
+                f'Voltage Dev: {obj_vals[0]:.4f} | Cost: {obj_vals[1]:.4f} | Reliability: {obj_vals[2]:.4f}'
+            )
+
+    slider = widgets.IntSlider(
+        min=0, max=len(nd_positions)-1, step=1,
+        value=len(nd_positions)//2,
+        description='Pareto Index'
+    )
+
+    def on_slider_change(change):
+        update_plot_data(change['new'])
+
+    slider.observe(on_slider_change, names='value')
+    layout_box = widgets.VBox([slider, fig_widget])
+    display(layout_box)
+except Exception as e:
+    print(f"Could not render interactive visualization. Error: {e}")
 
 # %% [markdown]
 # ![](qamoo_plot.png)
